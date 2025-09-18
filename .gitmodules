@@ -1,0 +1,6 @@
+[submodule ".devcontainer"]
+	path = .devcontainer
+	url = https://gitlab.ika.rwth-aachen.de/fb-fi/dev-environment/devcontainer.git
+[submodule ".vscode"]
+	path = .vscode
+	url = https://gitlab.ika.rwth-aachen.de/fb-fi/dev-environment/vscode.git
