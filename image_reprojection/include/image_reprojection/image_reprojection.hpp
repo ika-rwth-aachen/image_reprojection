@@ -87,6 +87,7 @@ class ImageReprojection : public rclcpp::Node {
   double projection_depth_{1.0};
   int sync_queue_size_{10};
   double transform_timeout_sec_{0.05};
+  double overlap_blend_factor_{1.0};
 
   sensor_msgs::msg::CameraInfo output_camera_info_{};
 

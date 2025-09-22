@@ -91,6 +91,12 @@ void ImageReprojection::loadParameters() {
     throw std::runtime_error("transform_timeout must be non-negative");
   }
 
+  overlap_blend_factor_ = this->declare_parameter<double>("overlap_blend_factor", 1.0);
+  if (!std::isfinite(overlap_blend_factor_)) {
+    overlap_blend_factor_ = 1.0;
+  }
+  overlap_blend_factor_ = std::clamp(overlap_blend_factor_, 0.0, 1.0);
+
   if (output_width_ <= 0 || output_height_ <= 0) {
     throw std::runtime_error("virtual_camera width and height must be positive");
   }
@@ -364,8 +370,13 @@ bool ImageReprojection::reprojectImages(const std::array<BgrImage, 2> &input_ima
   const int width = output_width_;
   const int height = output_height_;
 
-  std::vector<float> accumulator(static_cast<size_t>(height) * width * 3, 0.0f);
-  std::vector<float> weights(static_cast<size_t>(height) * width, 0.0f);
+  const size_t pixel_count = static_cast<size_t>(height) * width;
+  std::array<std::vector<float>, 2> accumulators = {
+      std::vector<float>(pixel_count * 3, 0.0f),
+      std::vector<float>(pixel_count * 3, 0.0f)};
+  std::array<std::vector<float>, 2> weights_per_camera = {
+      std::vector<float>(pixel_count, 0.0f),
+      std::vector<float>(pixel_count, 0.0f)};
 
   std::vector<double> x_norm(width);
   std::vector<double> y_norm(height);
@@ -382,6 +393,9 @@ bool ImageReprojection::reprojectImages(const std::array<BgrImage, 2> &input_ima
     const auto &intr = intrinsics[i];
     const BgrImage &image = input_images[i];
     const tf2::Transform &transform = transforms[i];
+
+    auto &acc = accumulators[i];
+    auto &weight_buffer = weights_per_camera[i];
 
     const double fx_in = intr.fx;
     const double fy_in = intr.fy;
@@ -421,11 +435,12 @@ bool ImageReprojection::reprojectImages(const std::array<BgrImage, 2> &input_ima
         }
 
         const std::array<float, 3> colour = bilinearSample(image, u_in, v_in);
-        const size_t base_index = (static_cast<size_t>(v) * width + u) * 3;
-        accumulator[base_index + 0] += colour[0];
-        accumulator[base_index + 1] += colour[1];
-        accumulator[base_index + 2] += colour[2];
-        weights[static_cast<size_t>(v) * width + u] += 1.0f;
+        const size_t pixel_index = static_cast<size_t>(v) * width + u;
+        const size_t base_index = pixel_index * 3;
+        acc[base_index + 0] += colour[0];
+        acc[base_index + 1] += colour[1];
+        acc[base_index + 2] += colour[2];
+        weight_buffer[pixel_index] += 1.0f;
       }
     }
   }
@@ -437,20 +452,59 @@ bool ImageReprojection::reprojectImages(const std::array<BgrImage, 2> &input_ima
   output_image.step = static_cast<uint32_t>(width * 3);
   output_image.data.resize(output_image.step * output_image.height);
 
+  const auto colour_from_accumulator = [](const std::vector<float> &acc, float weight, size_t base_index) {
+    std::array<float, 3> colour{0.0f, 0.0f, 0.0f};
+    if (weight > 0.0f) {
+      const float inv_weight = 1.0f / weight;
+      colour[0] = acc[base_index + 0] * inv_weight;
+      colour[1] = acc[base_index + 1] * inv_weight;
+      colour[2] = acc[base_index + 2] * inv_weight;
+    }
+    return colour;
+  };
+
   for (int v = 0; v < height; ++v) {
     for (int u = 0; u < width; ++u) {
-      const float weight = weights[static_cast<size_t>(v) * width + u];
-      uint8_t *pixel = &output_image.data[(static_cast<size_t>(v) * width + u) * 3];
-      if (weight > 0.0f) {
-        const size_t base_index = (static_cast<size_t>(v) * width + u) * 3;
-        const float b = accumulator[base_index + 0] / weight;
-        const float g = accumulator[base_index + 1] / weight;
-        const float r = accumulator[base_index + 2] / weight;
-        pixel[0] = static_cast<uint8_t>(std::clamp(b, 0.0f, 255.0f));
-        pixel[1] = static_cast<uint8_t>(std::clamp(g, 0.0f, 255.0f));
-        pixel[2] = static_cast<uint8_t>(std::clamp(r, 0.0f, 255.0f));
-      } else {
+      const size_t pixel_index = static_cast<size_t>(v) * width + u;
+      const size_t base_index = pixel_index * 3;
+      const float w0 = weights_per_camera[0][pixel_index];
+      const float w1 = weights_per_camera[1][pixel_index];
+      uint8_t *pixel = &output_image.data[base_index];
+
+      if (w0 <= 0.0f && w1 <= 0.0f) {
         pixel[0] = pixel[1] = pixel[2] = 0;
+        continue;
+      }
+
+      if (w1 <= 0.0f) {
+        const auto colour0 = colour_from_accumulator(accumulators[0], w0, base_index);
+        pixel[0] = static_cast<uint8_t>(std::clamp(colour0[0], 0.0f, 255.0f));
+        pixel[1] = static_cast<uint8_t>(std::clamp(colour0[1], 0.0f, 255.0f));
+        pixel[2] = static_cast<uint8_t>(std::clamp(colour0[2], 0.0f, 255.0f));
+        continue;
+      }
+
+      if (w0 <= 0.0f) {
+        const auto colour1 = colour_from_accumulator(accumulators[1], w1, base_index);
+        pixel[0] = static_cast<uint8_t>(std::clamp(colour1[0], 0.0f, 255.0f));
+        pixel[1] = static_cast<uint8_t>(std::clamp(colour1[1], 0.0f, 255.0f));
+        pixel[2] = static_cast<uint8_t>(std::clamp(colour1[2], 0.0f, 255.0f));
+        continue;
+      }
+
+      const auto colour0 = colour_from_accumulator(accumulators[0], w0, base_index);
+      const auto colour1 = colour_from_accumulator(accumulators[1], w1, base_index);
+      const float total_weight = w0 + w1;
+      const float normalized_w0 = w0 / total_weight;
+      const float normalized_w1 = w1 / total_weight;
+      const bool first_dominant = normalized_w0 >= normalized_w1;
+
+      for (size_t channel = 0; channel < 3; ++channel) {
+        const float weighted_average = normalized_w0 * colour0[channel] + normalized_w1 * colour1[channel];
+        const float dominant_value = first_dominant ? colour0[channel] : colour1[channel];
+        const float blended_value = static_cast<float>((1.0 - overlap_blend_factor_) * dominant_value +
+                                                      overlap_blend_factor_ * weighted_average);
+        pixel[channel] = static_cast<uint8_t>(std::clamp(blended_value, 0.0f, 255.0f));
       }
     }
   }
