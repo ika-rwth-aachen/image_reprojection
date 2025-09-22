@@ -14,7 +14,10 @@
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <sensor_msgs/msg/image.hpp>
 
-#include <tf2/LinearMath/Matrix3x3.h>
+#include <tf2/LinearMath/Transform.h>
+
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
 
 namespace image_reprojection {
 
@@ -29,7 +32,6 @@ class ImageReprojection : public rclcpp::Node {
   struct InputCameraConfig {
     std::string image_topic;
     std::string camera_info_topic;
-    tf2::Matrix3x3 rotation_virtual_to_input;
     std::string name;
   };
 
@@ -55,16 +57,20 @@ class ImageReprojection : public rclcpp::Node {
   void loadParameters();
   void setupSubscriptions();
   void configureOutputCameraInfo();
-  tf2::Matrix3x3 quaternionToRotation(const std::vector<double> &quaternion) const;
   void synchronizedCallback(const Image::ConstSharedPtr &image0,
                             const CameraInfo::ConstSharedPtr &info0,
                             const Image::ConstSharedPtr &image1,
                             const CameraInfo::ConstSharedPtr &info1);
 
+  bool lookupCameraTransforms(const rclcpp::Time &stamp,
+                              const std::array<std::string, 2> &camera_frames,
+                              std::array<tf2::Transform, 2> &transforms);
+
   static bool toBgrImage(const Image::ConstSharedPtr &msg, BgrImage &output, const rclcpp::Logger &logger);
   static bool extractIntrinsics(const CameraInfo::ConstSharedPtr &info, CameraIntrinsics &intrinsics, const rclcpp::Logger &logger);
   bool reprojectImages(const std::array<BgrImage, 2> &input_images,
                        const std::array<CameraIntrinsics, 2> &intrinsics,
+                       const std::array<tf2::Transform, 2> &transforms,
                        sensor_msgs::msg::Image &output_image) const;
   static std::array<float, 3> bilinearSample(const BgrImage &image, double u, double v);
 
@@ -78,7 +84,9 @@ class ImageReprojection : public rclcpp::Node {
   double fy_{0.0};
   double cx_{0.0};
   double cy_{0.0};
+  double projection_depth_{1.0};
   int sync_queue_size_{10};
+  double transform_timeout_sec_{0.05};
 
   sensor_msgs::msg::CameraInfo output_camera_info_{};
 
@@ -88,6 +96,9 @@ class ImageReprojection : public rclcpp::Node {
 
   rclcpp::Publisher<Image>::SharedPtr output_image_publisher_{};
   rclcpp::Publisher<CameraInfo>::SharedPtr output_info_publisher_{};
+
+  std::shared_ptr<tf2_ros::Buffer> tf_buffer_{};
+  std::shared_ptr<tf2_ros::TransformListener> tf_listener_{};
 };
 
 }  // namespace image_reprojection

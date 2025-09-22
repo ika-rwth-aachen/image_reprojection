@@ -17,8 +17,10 @@
 
 #include <rmw/qos_profiles.h>
 
-#include <tf2/LinearMath/Quaternion.h>
 #include <tf2/LinearMath/Vector3.h>
+#include <tf2/time.h>
+
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 namespace image_reprojection {
 
@@ -32,6 +34,9 @@ ImageReprojection::ImageReprojection(const rclcpp::NodeOptions &options)
     : rclcpp::Node("image_reprojection", options) {
   loadParameters();
   configureOutputCameraInfo();
+
+  tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
+  tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
   output_image_publisher_ = this->create_publisher<Image>(output_image_topic_, rclcpp::SensorDataQoS());
 
@@ -52,13 +57,9 @@ void ImageReprojection::loadParameters() {
 
   input_configs_[0].image_topic = this->declare_parameter<std::string>("input0.image_topic", "~/input0/image");
   input_configs_[0].camera_info_topic = this->declare_parameter<std::string>("input0.camera_info_topic", "~/input0/camera_info");
-  auto quat0 = this->declare_parameter<std::vector<double>>("input0.rotation_quaternion", {0.0, 0.0, 0.0, 1.0});
-  input_configs_[0].rotation_virtual_to_input = quaternionToRotation(quat0);
 
   input_configs_[1].image_topic = this->declare_parameter<std::string>("input1.image_topic", "~/input1/image");
   input_configs_[1].camera_info_topic = this->declare_parameter<std::string>("input1.camera_info_topic", "~/input1/camera_info");
-  auto quat1 = this->declare_parameter<std::vector<double>>("input1.rotation_quaternion", {0.0, 0.0, 0.0, 1.0});
-  input_configs_[1].rotation_virtual_to_input = quaternionToRotation(quat1);
 
   sync_queue_size_ = this->declare_parameter<int>("sync_queue_size", 10);
   if (sync_queue_size_ < 2) {
@@ -69,7 +70,7 @@ void ImageReprojection::loadParameters() {
   output_image_topic_ = this->declare_parameter<std::string>("output.image_topic", "~/output/image");
   output_info_topic_ = this->declare_parameter<std::string>("output.camera_info_topic", "~/output/camera_info");
 
-  output_frame_id_ = this->declare_parameter<std::string>("virtual_camera.frame_id", "virtual_camera");
+  output_frame_id_ = this->declare_parameter<std::string>("virtual_camera.frame_id", "");
   output_width_ = this->declare_parameter<int>("virtual_camera.width", 1280);
   output_height_ = this->declare_parameter<int>("virtual_camera.height", 720);
   fx_ = this->declare_parameter<double>("virtual_camera.fx", 800.0);
@@ -79,6 +80,16 @@ void ImageReprojection::loadParameters() {
   const double cy_default = output_height_ > 0 ? static_cast<double>(output_height_) * 0.5 : 0.0;
   cx_ = this->declare_parameter<double>("virtual_camera.cx", cx_default);
   cy_ = this->declare_parameter<double>("virtual_camera.cy", cy_default);
+
+  projection_depth_ = this->declare_parameter<double>("virtual_camera.plane_depth", 1.0);
+  if (projection_depth_ <= kEpsilon) {
+    throw std::runtime_error("virtual_camera.plane_depth must be positive");
+  }
+
+  transform_timeout_sec_ = this->declare_parameter<double>("transform_timeout", 0.05);
+  if (transform_timeout_sec_ < 0.0) {
+    throw std::runtime_error("transform_timeout must be non-negative");
+  }
 
   if (output_width_ <= 0 || output_height_ <= 0) {
     throw std::runtime_error("virtual_camera width and height must be positive");
@@ -131,22 +142,6 @@ void ImageReprojection::configureOutputCameraInfo() {
   output_camera_info_.roi.do_rectify = false;
 }
 
-tf2::Matrix3x3 ImageReprojection::quaternionToRotation(const std::vector<double> &quaternion) const {
-  if (quaternion.size() != 4) {
-    RCLCPP_WARN(get_logger(), "Quaternion parameter must contain exactly 4 elements (x, y, z, w). Using identity.");
-    return tf2::Matrix3x3(tf2::Quaternion(0.0, 0.0, 0.0, 1.0));
-  }
-
-  tf2::Quaternion q(quaternion[0], quaternion[1], quaternion[2], quaternion[3]);
-  if (q.length2() < kEpsilon) {
-    RCLCPP_WARN(get_logger(), "Quaternion parameter has near-zero length. Using identity.");
-    q = tf2::Quaternion(0.0, 0.0, 0.0, 1.0);
-  } else {
-    q.normalize();
-  }
-  return tf2::Matrix3x3(q);
-}
-
 void ImageReprojection::synchronizedCallback(const Image::ConstSharedPtr &image0,
                                               const CameraInfo::ConstSharedPtr &info0,
                                               const Image::ConstSharedPtr &image1,
@@ -161,8 +156,19 @@ void ImageReprojection::synchronizedCallback(const Image::ConstSharedPtr &image0
     return;
   }
 
+  std::array<std::string, 2> camera_frames{info0->header.frame_id, info1->header.frame_id};
+
+  if (output_frame_id_.empty()) {
+    output_frame_id_ = camera_frames[0];
+  }
+
+  std::array<tf2::Transform, 2> transforms;
+  if (!lookupCameraTransforms(image0->header.stamp, camera_frames, transforms)) {
+    return;
+  }
+
   sensor_msgs::msg::Image output_image;
-  if (!reprojectImages(input_images, intrinsics, output_image)) {
+  if (!reprojectImages(input_images, intrinsics, transforms, output_image)) {
     return;
   }
 
@@ -174,6 +180,43 @@ void ImageReprojection::synchronizedCallback(const Image::ConstSharedPtr &image0
 
   output_image_publisher_->publish(output_image);
   output_info_publisher_->publish(output_camera_info_);
+}
+
+bool ImageReprojection::lookupCameraTransforms(const rclcpp::Time &stamp,
+                                               const std::array<std::string, 2> &camera_frames,
+                                               std::array<tf2::Transform, 2> &transforms) {
+  if (!tf_buffer_) {
+    RCLCPP_ERROR(get_logger(), "TF buffer is not initialised.");
+    return false;
+  }
+
+  const tf2::Duration timeout = tf2::durationFromSec(transform_timeout_sec_);
+
+  for (size_t i = 0; i < camera_frames.size(); ++i) {
+    if (camera_frames[i].empty()) {
+      RCLCPP_ERROR(get_logger(), "Camera %zu provided an empty frame_id in CameraInfo.", i);
+      return false;
+    }
+
+    if (camera_frames[i] == output_frame_id_) {
+      transforms[i].setIdentity();
+      continue;
+    }
+
+    try {
+      const auto transform_msg = tf_buffer_->lookupTransform(camera_frames[i], output_frame_id_, stamp, timeout);
+      tf2::fromMsg(transform_msg.transform, transforms[i]);
+    } catch (const tf2::TransformException &ex) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                           "Failed to lookup transform from '%s' to '%s': %s",
+                           output_frame_id_.c_str(),
+                           camera_frames[i].c_str(),
+                           ex.what());
+      return false;
+    }
+  }
+
+  return true;
 }
 
 bool ImageReprojection::toBgrImage(const Image::ConstSharedPtr &msg, BgrImage &output, const rclcpp::Logger &logger) {
@@ -316,6 +359,7 @@ bool ImageReprojection::extractIntrinsics(const CameraInfo::ConstSharedPtr &info
 
 bool ImageReprojection::reprojectImages(const std::array<BgrImage, 2> &input_images,
                                         const std::array<CameraIntrinsics, 2> &intrinsics,
+                                        const std::array<tf2::Transform, 2> &transforms,
                                         sensor_msgs::msg::Image &output_image) const {
   const int width = output_width_;
   const int height = output_height_;
@@ -334,10 +378,10 @@ bool ImageReprojection::reprojectImages(const std::array<BgrImage, 2> &input_ima
     y_norm[v] = (static_cast<double>(v) - cy_) * inv_fy;
   }
 
-  for (size_t i = 0; i < input_configs_.size(); ++i) {
-    const auto &rotation = input_configs_[i].rotation_virtual_to_input;
+  for (size_t i = 0; i < input_images.size(); ++i) {
     const auto &intr = intrinsics[i];
     const BgrImage &image = input_images[i];
+    const tf2::Transform &transform = transforms[i];
 
     const double fx_in = intr.fx;
     const double fy_in = intr.fy;
@@ -357,17 +401,19 @@ bool ImageReprojection::reprojectImages(const std::array<BgrImage, 2> &input_ima
 
     for (int v = 0; v < height; ++v) {
       for (int u = 0; u < width; ++u) {
-        tf2::Vector3 dir_virtual(x_norm[u], y_norm[v], 1.0);
-        tf2::Vector3 dir_input = rotation * dir_virtual;
+        const tf2::Vector3 point_virtual(x_norm[u] * projection_depth_,
+                                         y_norm[v] * projection_depth_,
+                                         projection_depth_);
+        const tf2::Vector3 point_input = transform * point_virtual;
 
-        const double z = dir_input.z();
+        const double z = point_input.z();
         if (z <= kEpsilon) {
           continue;
         }
 
         const double inv_z = 1.0 / z;
-        const double u_in = fx_in * (dir_input.x() * inv_z) + cx_in;
-        const double v_in = fy_in * (dir_input.y() * inv_z) + cy_in;
+        const double u_in = fx_in * (point_input.x() * inv_z) + cx_in;
+        const double v_in = fy_in * (point_input.y() * inv_z) + cy_in;
 
         if (u_in < 0.0 || u_in > static_cast<double>(width_in - 1) ||
             v_in < 0.0 || v_in > static_cast<double>(height_in - 1)) {
