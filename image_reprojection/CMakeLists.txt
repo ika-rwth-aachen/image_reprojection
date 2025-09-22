@@ -8,7 +8,9 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_components REQUIRED)
-find_package(std_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(message_filters REQUIRED)
+find_package(tf2 REQUIRED)
 
 set(TARGET_NAME image_reprojection_component)
 
@@ -28,7 +30,9 @@ target_compile_features(${TARGET_NAME} PUBLIC c_std_99 cxx_std_17)
 ament_target_dependencies(${TARGET_NAME}
   rclcpp
   rclcpp_components
-  std_msgs
+  sensor_msgs
+  message_filters
+  tf2
 )
 
 install(TARGETS ${TARGET_NAME}

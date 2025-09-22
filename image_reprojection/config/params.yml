@@ -1,3 +1,33 @@
-/**/*:
+image_reprojection:
   ros__parameters:
-    param: 1.0
+    # Synchronisation queue length for ApproximateTime
+    sync_queue_size: 10
+
+    # Virtual output camera intrinsics and frame definition
+    virtual_camera:
+      frame_id: virtual_camera
+      width: 1280
+      height: 720
+      fx: 800.0
+      fy: 800.0
+      cx: 640.0
+      cy: 360.0
+
+    # Published topics for the reprojected image and its CameraInfo
+    output:
+      image_topic: /image_reprojection/output/image
+      camera_info_topic: /image_reprojection/output/camera_info
+
+    # First input camera configuration (typically the reference camera)
+    input0:
+      image_topic: /drivers/zed_camera/front_center/left/image_rect_color
+      camera_info_topic: /drivers/zed_camera/front_center/left/camera_info
+      # Rotation from virtual camera frame to this camera (x, y, z, w)
+      rotation_quaternion: [0.0, 0.0, 0.0, 1.0]
+
+    # Second input camera configuration
+    input1:
+      image_topic: /drivers/zed_camera/front_right/left/image_rect_color
+      camera_info_topic: /drivers/zed_camera/front_right/left/camera_info
+      # Example: 10 degree yaw to the right relative to the virtual camera
+      rotation_quaternion: [0.0, 0.0871557, 0.0, 0.9961947]

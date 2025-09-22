@@ -1,109 +1,93 @@
 #pragma once
 
+#include <array>
 #include <memory>
 #include <string>
 #include <vector>
 
-#include <rclcpp/rclcpp.hpp>
-#include <std_msgs/msg/int32.hpp>
+#include <message_filters/subscriber.h>
+#include <message_filters/synchronizer.h>
+#include <message_filters/sync_policies/approximate_time.h>
 
+#include <rclcpp/rclcpp.hpp>
+
+#include <sensor_msgs/msg/camera_info.hpp>
+#include <sensor_msgs/msg/image.hpp>
+
+#include <tf2/LinearMath/Matrix3x3.h>
 
 namespace image_reprojection {
 
-template <typename C> struct is_vector : std::false_type {};    
-template <typename T,typename A> struct is_vector< std::vector<T,A> > : std::true_type {};    
-template <typename C> inline constexpr bool is_vector_v = is_vector<C>::value;
-
-
 /**
- * @brief ImageReprojection class
+ * @brief Node that reprojects multiple camera images into the image plane of a virtual camera.
  */
 class ImageReprojection : public rclcpp::Node {
-
  public:
-
-  /**
-   * @brief Constructor
-   *
-   * @param options node options
-   */
-  explicit ImageReprojection(const rclcpp::NodeOptions& options);
+  explicit ImageReprojection(const rclcpp::NodeOptions &options);
 
  private:
+  struct InputCameraConfig {
+    std::string image_topic;
+    std::string camera_info_topic;
+    tf2::Matrix3x3 rotation_virtual_to_input;
+    std::string name;
+  };
 
-  /**
-   * @brief Declares and loads a ROS parameter
-   *
-   * @param name name
-   * @param param parameter variable to load into
-   * @param description description
-   * @param add_to_auto_reconfigurable_params enable reconfiguration of parameter
-   * @param is_required whether failure to load parameter will stop node
-   * @param read_only set parameter to read-only
-   * @param from_value parameter range minimum
-   * @param to_value parameter range maximum
-   * @param step_value parameter range step
-   * @param additional_constraints additional constraints description
-   */
-  template <typename T>
-  void declareAndLoadParameter(const std::string &name,
-                               T &param,
-                               const std::string &description,
-                               const bool add_to_auto_reconfigurable_params = true,
-                               const bool is_required = false,
-                               const bool read_only = false,
-                               const std::optional<double> &from_value = std::nullopt,
-                               const std::optional<double> &to_value = std::nullopt,
-                               const std::optional<double> &step_value = std::nullopt,
-                               const std::string &additional_constraints = "");
+  struct CameraIntrinsics {
+    double fx{0.0};
+    double fy{0.0};
+    double cx{0.0};
+    double cy{0.0};
+    int width{0};
+    int height{0};
+  };
 
-  /**
-   * @brief Handles reconfiguration when a parameter value is changed
-   *
-   * @param parameters parameters
-   * @return parameter change result
-   */
-  rcl_interfaces::msg::SetParametersResult parametersCallback(const std::vector<rclcpp::Parameter>& parameters);
+  struct BgrImage {
+    int width{0};
+    int height{0};
+    std::vector<uint8_t> data;
+  };
 
-  /**
-   * @brief Sets up subscribers, publishers, etc. to configure the node
-   */
-  void setup();
+  using Image = sensor_msgs::msg::Image;
+  using CameraInfo = sensor_msgs::msg::CameraInfo;
+  using SyncPolicy = message_filters::sync_policies::ApproximateTime<Image, CameraInfo, Image, CameraInfo>;
 
-  /**
-   * @brief Processes messages received by a subscriber
-   *
-   * @param msg message
-   */
-  void topicCallback(const std_msgs::msg::Int32::ConstSharedPtr& msg);
+  void loadParameters();
+  void setupSubscriptions();
+  void configureOutputCameraInfo();
+  tf2::Matrix3x3 quaternionToRotation(const std::vector<double> &quaternion) const;
+  void synchronizedCallback(const Image::ConstSharedPtr &image0,
+                            const CameraInfo::ConstSharedPtr &info0,
+                            const Image::ConstSharedPtr &image1,
+                            const CameraInfo::ConstSharedPtr &info1);
 
- private:
+  static bool toBgrImage(const Image::ConstSharedPtr &msg, BgrImage &output, const rclcpp::Logger &logger);
+  static bool extractIntrinsics(const CameraInfo::ConstSharedPtr &info, CameraIntrinsics &intrinsics, const rclcpp::Logger &logger);
+  bool reprojectImages(const std::array<BgrImage, 2> &input_images,
+                       const std::array<CameraIntrinsics, 2> &intrinsics,
+                       sensor_msgs::msg::Image &output_image) const;
+  static std::array<float, 3> bilinearSample(const BgrImage &image, double u, double v);
 
-  /**
-   * @brief Auto-reconfigurable parameters for dynamic reconfiguration
-   */
-  std::vector<std::tuple<std::string, std::function<void(const rclcpp::Parameter &)>>> auto_reconfigurable_params_;
+  std::array<InputCameraConfig, 2> input_configs_{};
+  std::string output_image_topic_{};
+  std::string output_info_topic_{};
+  std::string output_frame_id_{};
+  int output_width_{0};
+  int output_height_{0};
+  double fx_{0.0};
+  double fy_{0.0};
+  double cx_{0.0};
+  double cy_{0.0};
+  int sync_queue_size_{10};
 
-  /**
-   * @brief Callback handle for dynamic parameter reconfiguration
-   */
-  OnSetParametersCallbackHandle::SharedPtr parameters_callback_;
+  sensor_msgs::msg::CameraInfo output_camera_info_{};
 
-  /**
-   * @brief Subscriber
-   */
-  rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr subscriber_;
+  std::array<std::shared_ptr<message_filters::Subscriber<Image>>, 2> image_subscribers_{};
+  std::array<std::shared_ptr<message_filters::Subscriber<CameraInfo>>, 2> camera_info_subscribers_{};
+  std::shared_ptr<message_filters::Synchronizer<SyncPolicy>> synchronizer_{};
 
-  /**
-   * @brief Publisher
-   */
-  rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr publisher_;
-
-  /**
-   * @brief Dummy parameter (parameter) 
-   */
-  double param_ = 1.0;
+  rclcpp::Publisher<Image>::SharedPtr output_image_publisher_{};
+  rclcpp::Publisher<CameraInfo>::SharedPtr output_info_publisher_{};
 };
 
-
-}
+}  // namespace image_reprojection
