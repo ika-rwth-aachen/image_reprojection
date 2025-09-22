@@ -2,11 +2,11 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
-#include <functional>
 #include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <image_reprojection/image_reprojection.hpp>
@@ -27,6 +27,7 @@ namespace image_reprojection {
 namespace {
 
 constexpr double kEpsilon = 1e-9;
+constexpr double kDefaultAccumulatorTimeoutSec = 1.0;
 
 }  // namespace
 
@@ -47,24 +48,25 @@ ImageReprojection::ImageReprojection(const rclcpp::NodeOptions &options)
   setupSubscriptions();
 
   RCLCPP_INFO(get_logger(),
-              "Image reprojection node initialised. Publishing reprojected images on '%s' with frame_id '%s'",
-              output_image_topic_.c_str(), output_frame_id_.c_str());
+              "Image reprojection node initialised with %zu inputs. Publishing '%s' (frame_id '%s').",
+              input_configs_.size(),
+              output_image_topic_.c_str(),
+              output_frame_id_.c_str());
 }
 
 void ImageReprojection::loadParameters() {
-  input_configs_[0].name = "input0";
-  input_configs_[1].name = "input1";
-
-  input_configs_[0].image_topic = this->declare_parameter<std::string>("input0.image_topic", "~/input0/image");
-  input_configs_[0].camera_info_topic = this->declare_parameter<std::string>("input0.camera_info_topic", "~/input0/camera_info");
-
-  input_configs_[1].image_topic = this->declare_parameter<std::string>("input1.image_topic", "~/input1/image");
-  input_configs_[1].camera_info_topic = this->declare_parameter<std::string>("input1.camera_info_topic", "~/input1/camera_info");
-
   sync_queue_size_ = this->declare_parameter<int>("sync_queue_size", 10);
   if (sync_queue_size_ < 2) {
     RCLCPP_WARN(get_logger(), "sync_queue_size must be >= 2. Using 2 instead of %d.", sync_queue_size_);
     sync_queue_size_ = 2;
+  }
+
+  accumulator_timeout_sec_ = this->declare_parameter<double>("frame_timeout", kDefaultAccumulatorTimeoutSec);
+  if (accumulator_timeout_sec_ < 0.0) {
+    RCLCPP_WARN(get_logger(), "frame_timeout must be non-negative. Using %.2f instead of %.2f.",
+                kDefaultAccumulatorTimeoutSec,
+                accumulator_timeout_sec_);
+    accumulator_timeout_sec_ = kDefaultAccumulatorTimeoutSec;
   }
 
   output_image_topic_ = this->declare_parameter<std::string>("output.image_topic", "~/output/image");
@@ -97,6 +99,40 @@ void ImageReprojection::loadParameters() {
   }
   overlap_blend_factor_ = std::clamp(overlap_blend_factor_, 0.0, 1.0);
 
+  frame_time_tolerance_sec_ = this->declare_parameter<double>("frame_time_tolerance", 0.005);
+  if (frame_time_tolerance_sec_ < 0.0) {
+    RCLCPP_WARN(get_logger(), "frame_time_tolerance must be non-negative. Using 0.0 instead of %.6f.", frame_time_tolerance_sec_);
+    frame_time_tolerance_sec_ = 0.0;
+  }
+
+  const auto image_topics = this->declare_parameter<std::vector<std::string>>("input.image_topics", std::vector<std::string>{});
+  if (image_topics.empty()) {
+    throw std::runtime_error("input.image_topics must contain at least one topic");
+  }
+
+  input_configs_.clear();
+  input_configs_.reserve(image_topics.size());
+
+  for (size_t i = 0; i < image_topics.size(); ++i) {
+    const auto &topic = image_topics[i];
+    InputCameraConfig config;
+    config.name = "input_" + std::to_string(i);
+    config.image_topic = topic;
+
+    const std::string camera_info_param = "input." + topic + ".camera_info_topic";
+    if (this->has_parameter(camera_info_param)) {
+      config.camera_info_topic = this->get_parameter(camera_info_param).as_string();
+    } else {
+      config.camera_info_topic = this->declare_parameter<std::string>(camera_info_param, "");
+    }
+
+    if (config.camera_info_topic.empty()) {
+      throw std::runtime_error("Missing camera_info_topic parameter for input image topic '" + topic + "'");
+    }
+
+    input_configs_.push_back(std::move(config));
+  }
+
   if (output_width_ <= 0 || output_height_ <= 0) {
     throw std::runtime_error("virtual_camera width and height must be positive");
   }
@@ -106,27 +142,39 @@ void ImageReprojection::loadParameters() {
 }
 
 void ImageReprojection::setupSubscriptions() {
+  if (input_configs_.empty()) {
+    throw std::runtime_error("No input cameras configured");
+  }
+
+  camera_bundles_.clear();
+  camera_bundles_.resize(input_configs_.size());
+
   auto sensor_qos = rclcpp::SensorDataQoS();
   auto info_qos = rclcpp::QoS(10);
   info_qos.reliability(RMW_QOS_POLICY_RELIABILITY_RELIABLE);
 
   for (size_t i = 0; i < input_configs_.size(); ++i) {
-    image_subscribers_[i] = std::make_shared<message_filters::Subscriber<Image>>(this, input_configs_[i].image_topic, sensor_qos.get_rmw_qos_profile());
-    camera_info_subscribers_[i] = std::make_shared<message_filters::Subscriber<CameraInfo>>(this, input_configs_[i].camera_info_topic, info_qos.get_rmw_qos_profile());
+    auto &bundle = camera_bundles_[i];
+    bundle.image_subscriber = std::make_shared<message_filters::Subscriber<Image>>(
+        this, input_configs_[i].image_topic, sensor_qos.get_rmw_qos_profile());
+    bundle.info_subscriber = std::make_shared<message_filters::Subscriber<CameraInfo>>(
+        this, input_configs_[i].camera_info_topic, info_qos.get_rmw_qos_profile());
 
-    RCLCPP_INFO(get_logger(), "Subscribed to image topic '%s' and camera info topic '%s'",
-                input_configs_[i].image_topic.c_str(), input_configs_[i].camera_info_topic.c_str());
+    bundle.synchronizer = std::make_shared<message_filters::Synchronizer<CameraSyncPolicy>>(
+        CameraSyncPolicy(sync_queue_size_), *bundle.image_subscriber, *bundle.info_subscriber);
+
+    bundle.synchronizer->registerCallback(
+        [this, index = i](const Image::ConstSharedPtr &image,
+                          const CameraInfo::ConstSharedPtr &info,
+                          const auto &...) {
+          handleCameraUpdate(index, image, info);
+        });
+
+    RCLCPP_INFO(get_logger(),
+                "Subscribed to image '%s' and camera info '%s'",
+                input_configs_[i].image_topic.c_str(),
+                input_configs_[i].camera_info_topic.c_str());
   }
-
-  synchronizer_ = std::make_shared<message_filters::Synchronizer<SyncPolicy>>(
-      SyncPolicy(sync_queue_size_), *image_subscribers_[0], *camera_info_subscribers_[0], *image_subscribers_[1], *camera_info_subscribers_[1]);
-
-  synchronizer_->registerCallback(std::bind(&ImageReprojection::synchronizedCallback,
-                                            this,
-                                            std::placeholders::_1,
-                                            std::placeholders::_2,
-                                            std::placeholders::_3,
-                                            std::placeholders::_4));
 }
 
 void ImageReprojection::configureOutputCameraInfo() {
@@ -148,54 +196,153 @@ void ImageReprojection::configureOutputCameraInfo() {
   output_camera_info_.roi.do_rectify = false;
 }
 
-void ImageReprojection::synchronizedCallback(const Image::ConstSharedPtr &image0,
-                                              const CameraInfo::ConstSharedPtr &info0,
-                                              const Image::ConstSharedPtr &image1,
-                                              const CameraInfo::ConstSharedPtr &info1) {
-  std::array<BgrImage, 2> input_images;
-  if (!toBgrImage(image0, input_images[0], get_logger()) || !toBgrImage(image1, input_images[1], get_logger())) {
+void ImageReprojection::handleCameraUpdate(size_t index,
+                                           const Image::ConstSharedPtr &image,
+                                           const CameraInfo::ConstSharedPtr &info) {
+  const auto start_time = this->now();
+
+  if (index >= input_configs_.size()) {
+    RCLCPP_WARN(get_logger(), "Received data for out-of-range camera index %zu", index);
     return;
   }
 
-  std::array<CameraIntrinsics, 2> intrinsics{};
-  if (!extractIntrinsics(info0, intrinsics[0], get_logger()) || !extractIntrinsics(info1, intrinsics[1], get_logger())) {
+  BgrImage converted_image;
+  if (!toBgrImage(image, converted_image, get_logger())) {
     return;
   }
 
-  std::array<std::string, 2> camera_frames{info0->header.frame_id, info1->header.frame_id};
+  CameraIntrinsics intrinsics;
+  if (!extractIntrinsics(info, intrinsics, get_logger())) {
+    return;
+  }
+
+  const rclcpp::Time stamp = image->header.stamp;
+  const int64_t stamp_ns = stamp.nanoseconds();
+  const rclcpp::Duration tolerance = rclcpp::Duration::from_seconds(frame_time_tolerance_sec_);
+
+  auto within_tolerance = [&](const FrameAccumulator &candidate) {
+    const rclcpp::Duration diff = (stamp >= candidate.stamp) ? (stamp - candidate.stamp) : (candidate.stamp - stamp);
+    return diff <= tolerance;
+  };
+
+  auto selected_it = frame_accumulators_.end();
+  if (!frame_accumulators_.empty()) {
+    auto lower = frame_accumulators_.lower_bound(stamp_ns);
+    if (lower != frame_accumulators_.end() && within_tolerance(lower->second)) {
+      selected_it = lower;
+    } else if (lower != frame_accumulators_.begin()) {
+      auto prev = std::prev(lower);
+      if (within_tolerance(prev->second)) {
+        selected_it = prev;
+      }
+    }
+  }
+
+  if (selected_it == frame_accumulators_.end()) {
+    auto insert_result = frame_accumulators_.emplace(stamp_ns, FrameAccumulator{});
+    selected_it = insert_result.first;
+    auto &new_frame = selected_it->second;
+    new_frame.stamp = stamp;
+    new_frame.images.resize(input_configs_.size());
+    new_frame.intrinsics.resize(input_configs_.size());
+    new_frame.frame_ids.resize(input_configs_.size());
+    new_frame.ready.assign(input_configs_.size(), false);
+    RCLCPP_DEBUG(get_logger(), "Created new frame bucket %ld for camera %zu", selected_it->first, index);
+  }
+
+  auto &frame = selected_it->second;
+  const int64_t frame_key = selected_it->first;
+
+  frame.images[index] = std::move(converted_image);
+  frame.intrinsics[index] = intrinsics;
+  frame.frame_ids[index] = info->header.frame_id;
+  frame.ready[index] = true;
+
+  const size_t ready_count = static_cast<size_t>(std::count(frame.ready.begin(), frame.ready.end(), true));
+  const bool frame_ready = ready_count == frame.ready.size();
+  if (!frame_ready) {
+    RCLCPP_INFO(get_logger(),
+                "Frame %ld: %zu/%zu cameras ready (latest camera %zu, stamp %.3f s)",
+                frame_key,
+                ready_count,
+                frame.ready.size(),
+                index,
+                stamp.seconds());
+    cleanupAccumulators(stamp);
+    return;
+  }
+
+  RCLCPP_INFO(get_logger(),
+              "Frame %ld: all %zu cameras ready (processing)",
+              frame_key,
+              frame.images.size());
 
   if (output_frame_id_.empty()) {
-    output_frame_id_ = camera_frames[0];
+    output_frame_id_ = frame.frame_ids.front();
   }
 
-  std::array<tf2::Transform, 2> transforms;
-  if (!lookupCameraTransforms(image0->header.stamp, camera_frames, transforms)) {
+  std::vector<tf2::Transform> transforms(frame.frame_ids.size());
+  if (!lookupCameraTransforms(frame.stamp, frame.frame_ids, transforms)) {
+    RCLCPP_WARN(get_logger(), "Frame %ld dropped: missing transform", frame_key);
+    frame_accumulators_.erase(frame_key);
+    cleanupAccumulators(stamp);
     return;
+  }
+
+  std::vector<BgrImage> images;
+  images.reserve(frame.images.size());
+  for (auto &stored_image : frame.images) {
+    images.emplace_back(std::move(stored_image));
   }
 
   sensor_msgs::msg::Image output_image;
-  if (!reprojectImages(input_images, intrinsics, transforms, output_image)) {
+  if (!reprojectImages(images, frame.intrinsics, transforms, output_image)) {
+    RCLCPP_WARN(get_logger(), "Frame %ld dropped: reprojection failed", frame_key);
+    frame_accumulators_.erase(frame_key);
+    cleanupAccumulators(stamp);
     return;
   }
 
-  output_image.header.stamp = image0->header.stamp;
+  output_image.header.stamp = frame.stamp;
   output_image.header.frame_id = output_frame_id_;
 
-  output_camera_info_.header.stamp = output_image.header.stamp;
+  output_camera_info_.header.stamp = frame.stamp;
   output_camera_info_.header.frame_id = output_frame_id_;
 
   output_image_publisher_->publish(output_image);
   output_info_publisher_->publish(output_camera_info_);
+
+  const double elapsed_ms = static_cast<double>((this->now() - start_time).nanoseconds()) / 1e6;
+  RCLCPP_INFO(get_logger(), "Frame %ld published in %.2f ms", frame_key, elapsed_ms);
+
+  frame_accumulators_.erase(frame_key);
+  cleanupAccumulators(stamp);
+}
+
+void ImageReprojection::cleanupAccumulators(const rclcpp::Time &current_stamp) {
+  if (accumulator_timeout_sec_ <= 0.0) {
+    return;
+  }
+
+  const rclcpp::Duration timeout = rclcpp::Duration::from_seconds(accumulator_timeout_sec_);
+  for (auto it = frame_accumulators_.begin(); it != frame_accumulators_.end();) {
+    if (current_stamp - it->second.stamp > timeout) {
+      it = frame_accumulators_.erase(it);
+    } else {
+      ++it;
+    }
+  }
 }
 
 bool ImageReprojection::lookupCameraTransforms(const rclcpp::Time &stamp,
-                                               const std::array<std::string, 2> &camera_frames,
-                                               std::array<tf2::Transform, 2> &transforms) {
+                                               const std::vector<std::string> &camera_frames,
+                                               std::vector<tf2::Transform> &transforms) {
   if (!tf_buffer_) {
     RCLCPP_ERROR(get_logger(), "TF buffer is not initialised.");
     return false;
   }
 
+  transforms.resize(camera_frames.size());
   const tf2::Duration timeout = tf2::durationFromSec(transform_timeout_sec_);
 
   for (size_t i = 0; i < camera_frames.size(); ++i) {
@@ -363,20 +510,35 @@ bool ImageReprojection::extractIntrinsics(const CameraInfo::ConstSharedPtr &info
   return true;
 }
 
-bool ImageReprojection::reprojectImages(const std::array<BgrImage, 2> &input_images,
-                                        const std::array<CameraIntrinsics, 2> &intrinsics,
-                                        const std::array<tf2::Transform, 2> &transforms,
+bool ImageReprojection::reprojectImages(const std::vector<BgrImage> &input_images,
+                                        const std::vector<CameraIntrinsics> &intrinsics,
+                                        const std::vector<tf2::Transform> &transforms,
                                         sensor_msgs::msg::Image &output_image) const {
+  if (input_images.empty()) {
+    RCLCPP_WARN(get_logger(), "No input images available for reprojection.");
+    return false;
+  }
+
+  if (intrinsics.size() != input_images.size() || transforms.size() != input_images.size()) {
+    RCLCPP_ERROR(get_logger(),
+                 "Inconsistent input sizes: %zu images, %zu intrinsics, %zu transforms.",
+                 input_images.size(), intrinsics.size(), transforms.size());
+    return false;
+  }
+
   const int width = output_width_;
   const int height = output_height_;
-
   const size_t pixel_count = static_cast<size_t>(height) * width;
-  std::array<std::vector<float>, 2> accumulators = {
-      std::vector<float>(pixel_count * 3, 0.0f),
-      std::vector<float>(pixel_count * 3, 0.0f)};
-  std::array<std::vector<float>, 2> weights_per_camera = {
-      std::vector<float>(pixel_count, 0.0f),
-      std::vector<float>(pixel_count, 0.0f)};
+
+  std::vector<std::vector<float>> accumulators;
+  accumulators.reserve(input_images.size());
+  std::vector<std::vector<float>> weights;
+  weights.reserve(input_images.size());
+
+  for (size_t i = 0; i < input_images.size(); ++i) {
+    accumulators.emplace_back(pixel_count * 3, 0.0f);
+    weights.emplace_back(pixel_count, 0.0f);
+  }
 
   std::vector<double> x_norm(width);
   std::vector<double> y_norm(height);
@@ -394,9 +556,6 @@ bool ImageReprojection::reprojectImages(const std::array<BgrImage, 2> &input_ima
     const BgrImage &image = input_images[i];
     const tf2::Transform &transform = transforms[i];
 
-    auto &acc = accumulators[i];
-    auto &weight_buffer = weights_per_camera[i];
-
     const double fx_in = intr.fx;
     const double fy_in = intr.fy;
     const double cx_in = intr.cx;
@@ -412,6 +571,9 @@ bool ImageReprojection::reprojectImages(const std::array<BgrImage, 2> &input_ima
                        width_in,
                        height_in);
     }
+
+    auto &acc = accumulators[i];
+    auto &weight_buffer = weights[i];
 
     for (int v = 0; v < height; ++v) {
       for (int u = 0; u < width; ++u) {
@@ -467,43 +629,51 @@ bool ImageReprojection::reprojectImages(const std::array<BgrImage, 2> &input_ima
     for (int u = 0; u < width; ++u) {
       const size_t pixel_index = static_cast<size_t>(v) * width + u;
       const size_t base_index = pixel_index * 3;
-      const float w0 = weights_per_camera[0][pixel_index];
-      const float w1 = weights_per_camera[1][pixel_index];
       uint8_t *pixel = &output_image.data[base_index];
 
-      if (w0 <= 0.0f && w1 <= 0.0f) {
+      float total_weight = 0.0f;
+      float max_weight = -1.0f;
+      size_t dominant_index = 0;
+
+      for (size_t i = 0; i < weights.size(); ++i) {
+        const float w = weights[i][pixel_index];
+        if (w <= 0.0f) {
+          continue;
+        }
+        total_weight += w;
+        if (w > max_weight) {
+          max_weight = w;
+          dominant_index = i;
+        }
+      }
+
+      if (total_weight <= 0.0f) {
         pixel[0] = pixel[1] = pixel[2] = 0;
         continue;
       }
 
-      if (w1 <= 0.0f) {
-        const auto colour0 = colour_from_accumulator(accumulators[0], w0, base_index);
-        pixel[0] = static_cast<uint8_t>(std::clamp(colour0[0], 0.0f, 255.0f));
-        pixel[1] = static_cast<uint8_t>(std::clamp(colour0[1], 0.0f, 255.0f));
-        pixel[2] = static_cast<uint8_t>(std::clamp(colour0[2], 0.0f, 255.0f));
-        continue;
-      }
+      std::array<float, 3> dominant_colour{0.0f, 0.0f, 0.0f};
+      std::array<float, 3> average_colour{0.0f, 0.0f, 0.0f};
 
-      if (w0 <= 0.0f) {
-        const auto colour1 = colour_from_accumulator(accumulators[1], w1, base_index);
-        pixel[0] = static_cast<uint8_t>(std::clamp(colour1[0], 0.0f, 255.0f));
-        pixel[1] = static_cast<uint8_t>(std::clamp(colour1[1], 0.0f, 255.0f));
-        pixel[2] = static_cast<uint8_t>(std::clamp(colour1[2], 0.0f, 255.0f));
-        continue;
-      }
+      for (size_t i = 0; i < weights.size(); ++i) {
+        const float w = weights[i][pixel_index];
+        if (w <= 0.0f) {
+          continue;
+        }
+        const auto colour = colour_from_accumulator(accumulators[i], w, base_index);
+        const float normalized_w = w / total_weight;
+        average_colour[0] += normalized_w * colour[0];
+        average_colour[1] += normalized_w * colour[1];
+        average_colour[2] += normalized_w * colour[2];
 
-      const auto colour0 = colour_from_accumulator(accumulators[0], w0, base_index);
-      const auto colour1 = colour_from_accumulator(accumulators[1], w1, base_index);
-      const float total_weight = w0 + w1;
-      const float normalized_w0 = w0 / total_weight;
-      const float normalized_w1 = w1 / total_weight;
-      const bool first_dominant = normalized_w0 >= normalized_w1;
+        if (i == dominant_index) {
+          dominant_colour = colour;
+        }
+      }
 
       for (size_t channel = 0; channel < 3; ++channel) {
-        const float weighted_average = normalized_w0 * colour0[channel] + normalized_w1 * colour1[channel];
-        const float dominant_value = first_dominant ? colour0[channel] : colour1[channel];
-        const float blended_value = static_cast<float>((1.0 - overlap_blend_factor_) * dominant_value +
-                                                      overlap_blend_factor_ * weighted_average);
+        const float blended_value = static_cast<float>((1.0 - overlap_blend_factor_) * dominant_colour[channel] +
+                                                      overlap_blend_factor_ * average_colour[channel]);
         pixel[channel] = static_cast<uint8_t>(std::clamp(blended_value, 0.0f, 255.0f));
       }
     }

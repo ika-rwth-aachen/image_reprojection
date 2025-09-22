@@ -5,7 +5,7 @@ image_reprojection:
 
     # Virtual output camera intrinsics and frame definition
     virtual_camera:
-      frame_id: ""
+      frame_id: front_center_left_camera_optical_frame
       width: 2560
       height: 720
       # f = (size / 2) / tan(fov / 2)
@@ -21,18 +21,26 @@ image_reprojection:
       image_topic: /image_reprojection/output/image
       camera_info_topic: /image_reprojection/output/camera_info
 
-    # First input camera configuration (typically the reference camera)
-    input0:
-      image_topic: /drivers/zed_camera/front_center/left/image_rect_color
-      camera_info_topic: /drivers/zed_camera/front_center/left/camera_info
-
-    # Second input camera configuration
-    input1:
-      image_topic: /drivers/zed_camera/front_right/left/image_rect_color
-      camera_info_topic: /drivers/zed_camera/front_right/left/camera_info
+    input:
+      image_topics:
+        - /drivers/zed_camera/front_center/left/image_rect_color
+        - /drivers/zed_camera/front_left/left/image_rect_color
+        - /drivers/zed_camera/front_right/left/image_rect_color
+      /drivers/zed_camera/front_left/left/image_rect_color:
+        camera_info_topic: /drivers/zed_camera/front_left/left/camera_info
+      /drivers/zed_camera/front_center/left/image_rect_color:
+        camera_info_topic: /drivers/zed_camera/front_center/left/camera_info
+      /drivers/zed_camera/front_right/left/image_rect_color:
+        camera_info_topic: /drivers/zed_camera/front_right/left/camera_info
 
     # TF lookup timeout in seconds
     transform_timeout: 0.05
 
     # 0 = prefer dominant camera in overlaps, 1 = average contributions
     overlap_blend_factor: 0.0
+
+    # Maximum age (s) to keep partial frame data when waiting for other cameras
+    frame_timeout: 1.0
+
+    # Maximum time difference (s) between cameras to assemble a joint frame
+    frame_time_tolerance: 0.01

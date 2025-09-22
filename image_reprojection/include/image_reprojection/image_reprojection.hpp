@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -21,18 +22,15 @@
 
 namespace image_reprojection {
 
-/**
- * @brief Node that reprojects multiple camera images into the image plane of a virtual camera.
- */
 class ImageReprojection : public rclcpp::Node {
  public:
   explicit ImageReprojection(const rclcpp::NodeOptions &options);
 
  private:
   struct InputCameraConfig {
+    std::string name;
     std::string image_topic;
     std::string camera_info_topic;
-    std::string name;
   };
 
   struct CameraIntrinsics {
@@ -50,31 +48,45 @@ class ImageReprojection : public rclcpp::Node {
     std::vector<uint8_t> data;
   };
 
+  struct FrameAccumulator {
+    rclcpp::Time stamp;
+    std::vector<bool> ready;
+    std::vector<BgrImage> images;
+    std::vector<CameraIntrinsics> intrinsics;
+    std::vector<std::string> frame_ids;
+  };
+
   using Image = sensor_msgs::msg::Image;
   using CameraInfo = sensor_msgs::msg::CameraInfo;
-  using SyncPolicy = message_filters::sync_policies::ApproximateTime<Image, CameraInfo, Image, CameraInfo>;
+  using CameraSyncPolicy = message_filters::sync_policies::ApproximateTime<Image, CameraInfo>;
+
+  struct CameraBundle {
+    std::shared_ptr<message_filters::Subscriber<Image>> image_subscriber;
+    std::shared_ptr<message_filters::Subscriber<CameraInfo>> info_subscriber;
+    std::shared_ptr<message_filters::Synchronizer<CameraSyncPolicy>> synchronizer;
+  };
 
   void loadParameters();
   void setupSubscriptions();
   void configureOutputCameraInfo();
-  void synchronizedCallback(const Image::ConstSharedPtr &image0,
-                            const CameraInfo::ConstSharedPtr &info0,
-                            const Image::ConstSharedPtr &image1,
-                            const CameraInfo::ConstSharedPtr &info1);
+  void handleCameraUpdate(size_t index,
+                          const Image::ConstSharedPtr &image,
+                          const CameraInfo::ConstSharedPtr &info);
+  void cleanupAccumulators(const rclcpp::Time &current_stamp);
 
   bool lookupCameraTransforms(const rclcpp::Time &stamp,
-                              const std::array<std::string, 2> &camera_frames,
-                              std::array<tf2::Transform, 2> &transforms);
+                              const std::vector<std::string> &camera_frames,
+                              std::vector<tf2::Transform> &transforms);
 
   static bool toBgrImage(const Image::ConstSharedPtr &msg, BgrImage &output, const rclcpp::Logger &logger);
   static bool extractIntrinsics(const CameraInfo::ConstSharedPtr &info, CameraIntrinsics &intrinsics, const rclcpp::Logger &logger);
-  bool reprojectImages(const std::array<BgrImage, 2> &input_images,
-                       const std::array<CameraIntrinsics, 2> &intrinsics,
-                       const std::array<tf2::Transform, 2> &transforms,
+  bool reprojectImages(const std::vector<BgrImage> &input_images,
+                       const std::vector<CameraIntrinsics> &intrinsics,
+                       const std::vector<tf2::Transform> &transforms,
                        sensor_msgs::msg::Image &output_image) const;
   static std::array<float, 3> bilinearSample(const BgrImage &image, double u, double v);
 
-  std::array<InputCameraConfig, 2> input_configs_{};
+  std::vector<InputCameraConfig> input_configs_{};
   std::string output_image_topic_{};
   std::string output_info_topic_{};
   std::string output_frame_id_{};
@@ -88,12 +100,13 @@ class ImageReprojection : public rclcpp::Node {
   int sync_queue_size_{10};
   double transform_timeout_sec_{0.05};
   double overlap_blend_factor_{1.0};
+  double accumulator_timeout_sec_{1.0};
+  double frame_time_tolerance_sec_{0.005};
 
   sensor_msgs::msg::CameraInfo output_camera_info_{};
 
-  std::array<std::shared_ptr<message_filters::Subscriber<Image>>, 2> image_subscribers_{};
-  std::array<std::shared_ptr<message_filters::Subscriber<CameraInfo>>, 2> camera_info_subscribers_{};
-  std::shared_ptr<message_filters::Synchronizer<SyncPolicy>> synchronizer_{};
+  std::vector<CameraBundle> camera_bundles_{};
+  std::map<int64_t, FrameAccumulator> frame_accumulators_{};
 
   rclcpp::Publisher<Image>::SharedPtr output_image_publisher_{};
   rclcpp::Publisher<CameraInfo>::SharedPtr output_info_publisher_{};
