@@ -16,10 +16,28 @@ image_reprojection:
       cy: 375.0443420410156 # cy of front center camera
       plane_depth: 10.0
 
-    # Published topics for the reprojected image and its CameraInfo
+    projections:
+      planar:
+        enabled: true
+      equirectangular:
+        enabled: true
+
+    # Published topics for the planar reprojected image and its CameraInfo
     output:
-      image_topic: /image_reprojection/output/image
-      camera_info_topic: /image_reprojection/output/camera_info
+      image_topic: /image_reprojection/output/planar/image
+      camera_info_topic: /image_reprojection/output/planar/camera_info
+
+    # Equirectangular panorama configuration
+    equirectangular:
+      width: 2560
+      height: 720
+      horizontal_fov_deg: 160.0
+      vertical_fov_deg: 45.0
+      radius: 10.0
+      origin_frame_id: front_center_left_camera_optical_frame
+      output:
+        image_topic: /image_reprojection/output/equirectangular/image
+        camera_info_topic: /image_reprojection/output/equirectangular/camera_info
 
     input:
       image_topics:

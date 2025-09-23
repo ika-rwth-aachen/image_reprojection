@@ -68,7 +68,8 @@ class ImageReprojection : public rclcpp::Node {
 
   void loadParameters();
   void setupSubscriptions();
-  void configureOutputCameraInfo();
+  void configurePlanarCameraInfo();
+  void configureEquirectCameraInfo();
   void handleCameraUpdate(size_t index,
                           const Image::ConstSharedPtr &image,
                           const CameraInfo::ConstSharedPtr &info);
@@ -80,22 +81,39 @@ class ImageReprojection : public rclcpp::Node {
 
   static bool toBgrImage(const Image::ConstSharedPtr &msg, BgrImage &output, const rclcpp::Logger &logger);
   static bool extractIntrinsics(const CameraInfo::ConstSharedPtr &info, CameraIntrinsics &intrinsics, const rclcpp::Logger &logger);
-  bool reprojectImages(const std::vector<BgrImage> &input_images,
+  bool reprojectPlanar(const std::vector<BgrImage> &input_images,
                        const std::vector<CameraIntrinsics> &intrinsics,
                        const std::vector<tf2::Transform> &transforms,
                        sensor_msgs::msg::Image &output_image) const;
+  bool reprojectEquirectangular(const std::vector<BgrImage> &input_images,
+                                const std::vector<CameraIntrinsics> &intrinsics,
+                                const std::vector<tf2::Transform> &transforms,
+                                sensor_msgs::msg::Image &output_image) const;
   static std::array<float, 3> bilinearSample(const BgrImage &image, double u, double v);
 
   std::vector<InputCameraConfig> input_configs_{};
-  std::string output_image_topic_{};
-  std::string output_info_topic_{};
   std::string output_frame_id_{};
-  int output_width_{0};
-  int output_height_{0};
-  double fx_{0.0};
-  double fy_{0.0};
-  double cx_{0.0};
-  double cy_{0.0};
+
+  bool enable_planar_{true};
+  bool enable_equirectangular_{false};
+
+  std::string planar_image_topic_{};
+  std::string planar_info_topic_{};
+  int planar_width_{0};
+  int planar_height_{0};
+  double planar_fx_{0.0};
+  double planar_fy_{0.0};
+  double planar_cx_{0.0};
+  double planar_cy_{0.0};
+
+  std::string equirect_image_topic_{};
+  std::string equirect_info_topic_{};
+  int equirect_width_{0};
+  int equirect_height_{0};
+  double equirect_hfov_rad_{0.0};
+  double equirect_vfov_rad_{0.0};
+  std::string equirect_origin_frame_{};
+  double equirect_radius_{1.0};
   double projection_depth_{1.0};
   int sync_queue_size_{10};
   double transform_timeout_sec_{0.05};
@@ -103,13 +121,16 @@ class ImageReprojection : public rclcpp::Node {
   double accumulator_timeout_sec_{1.0};
   double frame_time_tolerance_sec_{0.005};
 
-  sensor_msgs::msg::CameraInfo output_camera_info_{};
+  sensor_msgs::msg::CameraInfo planar_camera_info_{};
+  sensor_msgs::msg::CameraInfo equirect_camera_info_{};
 
   std::vector<CameraBundle> camera_bundles_{};
   std::map<int64_t, FrameAccumulator> frame_accumulators_{};
 
-  rclcpp::Publisher<Image>::SharedPtr output_image_publisher_{};
-  rclcpp::Publisher<CameraInfo>::SharedPtr output_info_publisher_{};
+  rclcpp::Publisher<Image>::SharedPtr planar_image_publisher_{};
+  rclcpp::Publisher<CameraInfo>::SharedPtr planar_info_publisher_{};
+  rclcpp::Publisher<Image>::SharedPtr equirect_image_publisher_{};
+  rclcpp::Publisher<CameraInfo>::SharedPtr equirect_info_publisher_{};
 
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_{};
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_{};
