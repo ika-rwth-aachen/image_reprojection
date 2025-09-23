@@ -6,12 +6,27 @@
         - /drivers/zed_camera/front_center/left/image_rect_color
         - /drivers/zed_camera/front_left/left/image_rect_color
         - /drivers/zed_camera/front_right/left/image_rect_color
+        # - /drivers/zed_camera/mid_left/left/image_rect_color
+        # - /drivers/zed_camera/mid_right/left/image_rect_color
+        # - /drivers/zed_camera/rear_left/left/image_rect_color
+        # - /drivers/zed_camera/rear_center/left/image_rect_color
+        # - /drivers/zed_camera/rear_right/left/image_rect_color
       /drivers/zed_camera/front_left/left/image_rect_color:
         camera_info_topic: /drivers/zed_camera/front_left/left/camera_info
       /drivers/zed_camera/front_center/left/image_rect_color:
         camera_info_topic: /drivers/zed_camera/front_center/left/camera_info
       /drivers/zed_camera/front_right/left/image_rect_color:
         camera_info_topic: /drivers/zed_camera/front_right/left/camera_info
+      /drivers/zed_camera/mid_left/left/image_rect_color:
+        camera_info_topic: /drivers/zed_camera/mid_left/left/camera_info
+      /drivers/zed_camera/mid_right/left/image_rect_color:
+        camera_info_topic: /drivers/zed_camera/mid_right/left/camera_info
+      /drivers/zed_camera/rear_left/left/image_rect_color:
+        camera_info_topic: /drivers/zed_camera/rear_left/left/camera_info
+      /drivers/zed_camera/rear_center/left/image_rect_color:
+        camera_info_topic: /drivers/zed_camera/rear_center/left/camera_info
+      /drivers/zed_camera/rear_right/left/image_rect_color:
+        camera_info_topic: /drivers/zed_camera/rear_right/left/camera_info
 
     output:
       projection:
@@ -20,20 +35,20 @@
           image_topic: /image_reprojection/planar/image
           camera_info_topic: /image_reprojection/planar/camera_info
           optical_frame_id: front_center_left_camera_optical_frame
-          width: 2560
+          width: 3840
           height: 720
           depth: 10.0
-          fov_x: 120.0
+          fov_x: 150.0
           blend_factor: 0.0
         equirectangular:
           enabled: true
           image_topic: /image_reprojection/equirectangular/image
           camera_info_topic: /image_reprojection/equirectangular/camera_info
           optical_frame_id: front_center_left_camera_optical_frame
-          width: 2560
+          width: 3840
           height: 720
           radius: 10.0
-          fov_x: 120.0
+          fov_x: 360.0
           blend_factor: 0.0
 
     params:

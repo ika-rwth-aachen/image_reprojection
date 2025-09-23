@@ -169,14 +169,13 @@ void ImageReprojection::loadParameters() {
       throw std::runtime_error("output.projection.equirectangular.radius must be positive");
     }
 
-    const double hfov_clamped_deg = std::clamp(equirect_fov_x_deg, 1.0, 359.0);
+    const double hfov_clamped_deg = std::clamp(equirect_fov_x_deg, 1.0, 360.0);
     equirect_hfov_rad_ = hfov_clamped_deg * kPi / 180.0;
-    const double tan_half_h = std::tan(equirect_hfov_rad_ * 0.5);
     const double aspect = static_cast<double>(equirect_height_) / static_cast<double>(equirect_width_);
-    equirect_vfov_rad_ = 2.0 * std::atan(aspect * tan_half_h);
-    if (std::abs(equirect_vfov_rad_) < kEpsilon) {
-      equirect_vfov_rad_ = kEpsilon;
-    }
+    equirect_vfov_rad_ = equirect_hfov_rad_ * aspect;  // linear degrees-per-pixel mapping
+    // clamp vertical FoV to sensible range (0, pi]
+    if (equirect_vfov_rad_ > kPi) equirect_vfov_rad_ = kPi;
+    if (equirect_vfov_rad_ < kEpsilon) equirect_vfov_rad_ = kEpsilon;
     if (!std::isfinite(equirect_blend_factor_)) {
       equirect_blend_factor_ = 1.0;
     }
