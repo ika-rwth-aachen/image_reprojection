@@ -77,6 +77,7 @@ class ImageReprojection : public rclcpp::Node {
 
   bool lookupCameraTransforms(const rclcpp::Time &stamp,
                               const std::vector<std::string> &camera_frames,
+                              const std::string &target_frame,
                               std::vector<tf2::Transform> &transforms);
 
   static bool toBgrImage(const Image::ConstSharedPtr &msg, BgrImage &output, const rclcpp::Logger &logger);
@@ -92,7 +93,6 @@ class ImageReprojection : public rclcpp::Node {
   static std::array<float, 3> bilinearSample(const BgrImage &image, double u, double v);
 
   std::vector<InputCameraConfig> input_configs_{};
-  std::string output_frame_id_{};
 
   bool enable_planar_{true};
   bool enable_equirectangular_{false};
@@ -105,6 +105,9 @@ class ImageReprojection : public rclcpp::Node {
   double planar_fy_{0.0};
   double planar_cx_{0.0};
   double planar_cy_{0.0};
+  double planar_depth_{1.0};
+  double planar_blend_factor_{1.0};
+  std::string planar_frame_id_{};
 
   std::string equirect_image_topic_{};
   std::string equirect_info_topic_{};
@@ -112,12 +115,11 @@ class ImageReprojection : public rclcpp::Node {
   int equirect_height_{0};
   double equirect_hfov_rad_{0.0};
   double equirect_vfov_rad_{0.0};
-  std::string equirect_origin_frame_{};
+  double equirect_blend_factor_{1.0};
+  std::string equirect_frame_id_{};
   double equirect_radius_{1.0};
-  double projection_depth_{1.0};
   int sync_queue_size_{10};
   double transform_timeout_sec_{0.05};
-  double overlap_blend_factor_{1.0};
   double accumulator_timeout_sec_{1.0};
   double frame_time_tolerance_sec_{0.005};
 

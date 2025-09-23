@@ -74,21 +74,30 @@ ImageReprojection::ImageReprojection(const rclcpp::NodeOptions &options)
     }
   }
 
+  std::string frame_info;
+  if (enable_planar_) {
+    frame_info += "planar:" + (planar_frame_id_.empty() ? std::string("<dynamic>") : planar_frame_id_);
+  }
+  if (enable_equirectangular_) {
+    if (!frame_info.empty()) frame_info += ", ";
+    frame_info += "equirect:" + (equirect_frame_id_.empty() ? std::string("<dynamic>") : equirect_frame_id_);
+  }
+
   RCLCPP_INFO(get_logger(),
-              "Image reprojection node initialised with %zu inputs. Projections: %s. Frame id '%s'.",
+              "Image reprojection node initialised with %zu inputs. Projections: %s (%s).",
               input_configs_.size(),
               projection_list.c_str(),
-              output_frame_id_.empty() ? "<dynamic>" : output_frame_id_.c_str());
+              frame_info.empty() ? "n/a" : frame_info.c_str());
 }
 
 void ImageReprojection::loadParameters() {
-  sync_queue_size_ = this->declare_parameter<int>("sync_queue_size", 10);
+  sync_queue_size_ = this->declare_parameter<int>("params.sync_queue_size", 10);
   if (sync_queue_size_ < 2) {
     RCLCPP_WARN(get_logger(), "sync_queue_size must be >= 2. Using 2 instead of %d.", sync_queue_size_);
     sync_queue_size_ = 2;
   }
 
-  accumulator_timeout_sec_ = this->declare_parameter<double>("frame_timeout", kDefaultAccumulatorTimeoutSec);
+  accumulator_timeout_sec_ = this->declare_parameter<double>("params.frame_timeout", kDefaultAccumulatorTimeoutSec);
   if (accumulator_timeout_sec_ < 0.0) {
     RCLCPP_WARN(get_logger(), "frame_timeout must be non-negative. Using %.2f instead of %.2f.",
                 kDefaultAccumulatorTimeoutSec,
@@ -96,88 +105,82 @@ void ImageReprojection::loadParameters() {
     accumulator_timeout_sec_ = kDefaultAccumulatorTimeoutSec;
   }
 
-  enable_planar_ = this->declare_parameter<bool>("projections.planar.enabled", true);
-  enable_equirectangular_ = this->declare_parameter<bool>("projections.equirectangular.enabled", false);
+  transform_timeout_sec_ = this->declare_parameter<double>("params.transform_timeout", 0.05);
+  if (transform_timeout_sec_ < 0.0) {
+    throw std::runtime_error("transform_timeout must be non-negative");
+  }
+
+  frame_time_tolerance_sec_ = this->declare_parameter<double>("params.frame_time_tolerance", 0.005);
+  if (frame_time_tolerance_sec_ < 0.0) {
+    RCLCPP_WARN(get_logger(), "frame_time_tolerance must be non-negative. Using 0.0 instead of %.6f.", frame_time_tolerance_sec_);
+    frame_time_tolerance_sec_ = 0.0;
+  }
+
+  enable_planar_ = this->declare_parameter<bool>("output.projection.planar.enabled", true);
+  enable_equirectangular_ = this->declare_parameter<bool>("output.projection.equirectangular.enabled", false);
 
   if (!enable_planar_ && !enable_equirectangular_) {
     throw std::runtime_error("At least one projection (planar or equirectangular) must be enabled");
   }
 
-  output_frame_id_ = this->declare_parameter<std::string>("virtual_camera.frame_id", "");
-
-  projection_depth_ = this->declare_parameter<double>("virtual_camera.plane_depth", 1.0);
-  if (projection_depth_ <= kEpsilon) {
-    throw std::runtime_error("virtual_camera.plane_depth must be positive");
-  }
-
   if (enable_planar_) {
-    planar_image_topic_ = this->declare_parameter<std::string>("output.image_topic", "~/output/image");
-    planar_info_topic_ = this->declare_parameter<std::string>("output.camera_info_topic", "~/output/camera_info");
-    planar_width_ = this->declare_parameter<int>("virtual_camera.width", 1280);
-    planar_height_ = this->declare_parameter<int>("virtual_camera.height", 720);
-    planar_fx_ = this->declare_parameter<double>("virtual_camera.fx", 800.0);
-    planar_fy_ = this->declare_parameter<double>("virtual_camera.fy", 800.0);
-
-    const double cx_default = planar_width_ > 0 ? static_cast<double>(planar_width_) * 0.5 : 0.0;
-    const double cy_default = planar_height_ > 0 ? static_cast<double>(planar_height_) * 0.5 : 0.0;
-    planar_cx_ = this->declare_parameter<double>("virtual_camera.cx", cx_default);
-    planar_cy_ = this->declare_parameter<double>("virtual_camera.cy", cy_default);
+    planar_image_topic_ = this->declare_parameter<std::string>("output.projection.planar.image_topic", "~/output/planar/image");
+    planar_info_topic_ = this->declare_parameter<std::string>("output.projection.planar.camera_info_topic", "~/output/planar/camera_info");
+    planar_frame_id_ = this->declare_parameter<std::string>("output.projection.planar.optical_frame_id", "");
+    planar_width_ = this->declare_parameter<int>("output.projection.planar.width", 1280);
+    planar_height_ = this->declare_parameter<int>("output.projection.planar.height", 720);
+    planar_depth_ = this->declare_parameter<double>("output.projection.planar.depth", 1.0);
+    planar_blend_factor_ = this->declare_parameter<double>("output.projection.planar.blend_factor", 1.0);
+    const double planar_fov_x_deg = this->declare_parameter<double>("output.projection.planar.fov_x", 90.0);
 
     if (planar_width_ <= 0 || planar_height_ <= 0) {
-      throw std::runtime_error("virtual_camera width and height must be positive");
+      throw std::runtime_error("output.projection.planar width and height must be positive");
     }
-    if (planar_fx_ <= kEpsilon || planar_fy_ <= kEpsilon) {
-      throw std::runtime_error("virtual_camera focal lengths must be positive");
+    if (planar_depth_ <= kEpsilon) {
+      throw std::runtime_error("output.projection.planar.depth must be positive");
     }
+
+    const double planar_fov_x_rad = std::clamp(planar_fov_x_deg, 1.0, 179.0) * kPi / 180.0;
+    const double half_width = static_cast<double>(planar_width_) * 0.5;
+    planar_fx_ = half_width / std::tan(planar_fov_x_rad * 0.5);
+    planar_fy_ = planar_fx_;  // square pixels assumption
+    planar_cx_ = half_width;
+    planar_cy_ = static_cast<double>(planar_height_) * 0.5;
+    if (!std::isfinite(planar_blend_factor_)) {
+      planar_blend_factor_ = 1.0;
+    }
+    planar_blend_factor_ = std::clamp(planar_blend_factor_, 0.0, 1.0);
   }
 
   if (enable_equirectangular_) {
-    equirect_width_ = this->declare_parameter<int>("equirectangular.width", 2048);
-    equirect_height_ = this->declare_parameter<int>("equirectangular.height", 1024);
-    equirect_image_topic_ = this->declare_parameter<std::string>("equirectangular.output.image_topic", "~/output/equirectangular/image");
-    equirect_info_topic_ = this->declare_parameter<std::string>("equirectangular.output.camera_info_topic", "~/output/equirectangular/camera_info");
-    const double hfov_deg = this->declare_parameter<double>("equirectangular.horizontal_fov_deg", 360.0);
-    const double vfov_deg = this->declare_parameter<double>("equirectangular.vertical_fov_deg", 180.0);
-    equirect_origin_frame_ = this->declare_parameter<std::string>("equirectangular.origin_frame_id", "");
-    equirect_radius_ = this->declare_parameter<double>("equirectangular.radius", projection_depth_);
-
-    equirect_hfov_rad_ = std::clamp(hfov_deg, -360.0, 360.0) * kPi / 180.0;
-    equirect_vfov_rad_ = std::clamp(vfov_deg, -180.0, 180.0) * kPi / 180.0;
-
-    if (std::abs(equirect_hfov_rad_) < kEpsilon) {
-      throw std::runtime_error("equirectangular horizontal_fov_deg must be non-zero");
-    }
-    if (std::abs(equirect_vfov_rad_) < kEpsilon) {
-      throw std::runtime_error("equirectangular vertical_fov_deg must be non-zero");
-    }
-
-    equirect_hfov_rad_ = std::abs(equirect_hfov_rad_);
-    equirect_vfov_rad_ = std::abs(equirect_vfov_rad_);
-
-    if (equirect_radius_ <= kEpsilon) {
-      throw std::runtime_error("equirectangular.radius must be positive");
-    }
+    equirect_image_topic_ = this->declare_parameter<std::string>("output.projection.equirectangular.image_topic", "~/output/equirectangular/image");
+    equirect_info_topic_ = this->declare_parameter<std::string>("output.projection.equirectangular.camera_info_topic", "~/output/equirectangular/camera_info");
+    equirect_frame_id_ = this->declare_parameter<std::string>("output.projection.equirectangular.optical_frame_id", "");
+    equirect_width_ = this->declare_parameter<int>("output.projection.equirectangular.width", 2048);
+    equirect_height_ = this->declare_parameter<int>("output.projection.equirectangular.height", 1024);
+    equirect_radius_ = this->declare_parameter<double>("output.projection.equirectangular.radius", enable_planar_ ? planar_depth_ : 1.0);
+    equirect_blend_factor_ = this->declare_parameter<double>("output.projection.equirectangular.blend_factor", 1.0);
+    const double equirect_fov_x_deg = this->declare_parameter<double>("output.projection.equirectangular.fov_x", 360.0);
 
     if (equirect_width_ <= 0 || equirect_height_ <= 0) {
-      throw std::runtime_error("equirectangular width and height must be positive");
+      throw std::runtime_error("output.projection.equirectangular width and height must be positive");
     }
-  }
+    if (equirect_radius_ <= kEpsilon) {
+      throw std::runtime_error("output.projection.equirectangular.radius must be positive");
+    }
 
-  transform_timeout_sec_ = this->declare_parameter<double>("transform_timeout", 0.05);
-  if (transform_timeout_sec_ < 0.0) {
-    throw std::runtime_error("transform_timeout must be non-negative");
-  }
-
-  overlap_blend_factor_ = this->declare_parameter<double>("overlap_blend_factor", 1.0);
-  if (!std::isfinite(overlap_blend_factor_)) {
-    overlap_blend_factor_ = 1.0;
-  }
-  overlap_blend_factor_ = std::clamp(overlap_blend_factor_, 0.0, 1.0);
-
-  frame_time_tolerance_sec_ = this->declare_parameter<double>("frame_time_tolerance", 0.005);
-  if (frame_time_tolerance_sec_ < 0.0) {
-    RCLCPP_WARN(get_logger(), "frame_time_tolerance must be non-negative. Using 0.0 instead of %.6f.", frame_time_tolerance_sec_);
-    frame_time_tolerance_sec_ = 0.0;
+    const double hfov_clamped_deg = std::clamp(equirect_fov_x_deg, 1.0, 359.0);
+    equirect_hfov_rad_ = hfov_clamped_deg * kPi / 180.0;
+    const double tan_half_h = std::tan(equirect_hfov_rad_ * 0.5);
+    const double aspect = static_cast<double>(equirect_height_) / static_cast<double>(equirect_width_);
+    equirect_vfov_rad_ = 2.0 * std::atan(aspect * tan_half_h);
+    if (std::abs(equirect_vfov_rad_) < kEpsilon) {
+      equirect_vfov_rad_ = kEpsilon;
+    }
+    if (!std::isfinite(equirect_blend_factor_)) {
+      equirect_blend_factor_ = 1.0;
+    }
+    equirect_blend_factor_ = std::clamp(equirect_blend_factor_, 0.0, 1.0);
   }
 
   const auto image_topics = this->declare_parameter<std::vector<std::string>>("input.image_topics", std::vector<std::string>{});
@@ -375,43 +378,46 @@ void ImageReprojection::handleCameraUpdate(size_t index,
               frame_key,
               frame.images.size());
 
-  if (output_frame_id_.empty()) {
-    output_frame_id_ = frame.frame_ids.front();
+  const std::string fallback_frame = frame.frame_ids.front();
+
+  if (enable_planar_ && planar_frame_id_.empty()) {
+    planar_frame_id_ = fallback_frame;
+  }
+  if (enable_equirectangular_ && equirect_frame_id_.empty()) {
+    equirect_frame_id_ = fallback_frame;
   }
 
-  std::vector<tf2::Transform> transforms(frame.frame_ids.size());
-  if (!lookupCameraTransforms(frame.stamp, frame.frame_ids, transforms)) {
-    RCLCPP_WARN(get_logger(), "Frame %ld dropped: missing transform", frame_key);
-    frame_accumulators_.erase(frame_key);
-    cleanupAccumulators(stamp);
-    return;
+  std::vector<tf2::Transform> planar_transforms;
+  bool planar_transforms_valid = false;
+  if (enable_planar_) {
+    planar_transforms_valid = lookupCameraTransforms(frame.stamp, frame.frame_ids, planar_frame_id_, planar_transforms);
+    if (!planar_transforms_valid) {
+      RCLCPP_WARN(get_logger(), "Frame %ld dropped: missing transforms for planar target '%s'",
+                  frame_key,
+                  planar_frame_id_.c_str());
+    }
   }
 
   std::vector<tf2::Transform> equirect_transforms;
+  bool equirect_transforms_valid = false;
   if (enable_equirectangular_) {
-    equirect_transforms = transforms;
-    if (!equirect_origin_frame_.empty() && equirect_origin_frame_ != output_frame_id_) {
-      try {
-        const auto origin_tf_msg = tf_buffer_->lookupTransform(
-            equirect_origin_frame_, output_frame_id_, frame.stamp, tf2::durationFromSec(transform_timeout_sec_));
-        tf2::Transform output_to_origin;
-        tf2::fromMsg(origin_tf_msg.transform, output_to_origin);
-        const tf2::Transform origin_to_output = output_to_origin.inverse();
-        for (auto &transform : equirect_transforms) {
-          transform = transform * origin_to_output;
-        }
-      } catch (const tf2::TransformException &ex) {
-        RCLCPP_WARN(get_logger(),
-                    "Frame %ld dropped: failed to transform from output frame '%s' to equirect origin '%s': %s",
+    if (enable_planar_ && planar_transforms_valid && planar_frame_id_ == equirect_frame_id_) {
+      equirect_transforms = planar_transforms;
+      equirect_transforms_valid = true;
+    } else {
+      equirect_transforms_valid = lookupCameraTransforms(frame.stamp, frame.frame_ids, equirect_frame_id_, equirect_transforms);
+      if (!equirect_transforms_valid) {
+        RCLCPP_WARN(get_logger(), "Frame %ld dropped: missing transforms for equirectangular target '%s'",
                     frame_key,
-                    output_frame_id_.c_str(),
-                    equirect_origin_frame_.c_str(),
-                    ex.what());
-        frame_accumulators_.erase(frame_key);
-        cleanupAccumulators(stamp);
-        return;
+                    equirect_frame_id_.c_str());
       }
     }
+  }
+
+  if ((enable_planar_ && !planar_transforms_valid) && (enable_equirectangular_ && !equirect_transforms_valid)) {
+    frame_accumulators_.erase(frame_key);
+    cleanupAccumulators(stamp);
+    return;
   }
 
   std::vector<BgrImage> images;
@@ -423,14 +429,14 @@ void ImageReprojection::handleCameraUpdate(size_t index,
   bool planar_success = false;
   bool equirect_success = false;
 
-  if (enable_planar_) {
+  if (enable_planar_ && planar_transforms_valid) {
     sensor_msgs::msg::Image planar_output;
-    if (reprojectPlanar(images, frame.intrinsics, transforms, planar_output)) {
+    if (reprojectPlanar(images, frame.intrinsics, planar_transforms, planar_output)) {
       planar_output.header.stamp = frame.stamp;
-      planar_output.header.frame_id = output_frame_id_;
+      planar_output.header.frame_id = planar_frame_id_;
       auto planar_info = planar_camera_info_;
       planar_info.header.stamp = frame.stamp;
-      planar_info.header.frame_id = output_frame_id_;
+      planar_info.header.frame_id = planar_frame_id_;
 
       planar_image_publisher_->publish(planar_output);
       planar_info_publisher_->publish(planar_info);
@@ -440,15 +446,14 @@ void ImageReprojection::handleCameraUpdate(size_t index,
     }
   }
 
-  if (enable_equirectangular_) {
+  if (enable_equirectangular_ && equirect_transforms_valid) {
     sensor_msgs::msg::Image equirect_output;
     if (reprojectEquirectangular(images, frame.intrinsics, equirect_transforms, equirect_output)) {
-      const std::string panorama_frame = equirect_origin_frame_.empty() ? output_frame_id_ : equirect_origin_frame_;
       equirect_output.header.stamp = frame.stamp;
-      equirect_output.header.frame_id = panorama_frame;
+      equirect_output.header.frame_id = equirect_frame_id_;
       auto equirect_info = equirect_camera_info_;
       equirect_info.header.stamp = frame.stamp;
-      equirect_info.header.frame_id = panorama_frame;
+      equirect_info.header.frame_id = equirect_frame_id_;
 
       equirect_image_publisher_->publish(equirect_output);
       equirect_info_publisher_->publish(equirect_info);
@@ -500,9 +505,15 @@ void ImageReprojection::cleanupAccumulators(const rclcpp::Time &current_stamp) {
 
 bool ImageReprojection::lookupCameraTransforms(const rclcpp::Time &stamp,
                                                const std::vector<std::string> &camera_frames,
+                                               const std::string &target_frame,
                                                std::vector<tf2::Transform> &transforms) {
   if (!tf_buffer_) {
     RCLCPP_ERROR(get_logger(), "TF buffer is not initialised.");
+    return false;
+  }
+
+  if (target_frame.empty()) {
+    RCLCPP_ERROR(get_logger(), "Target frame for reprojection is empty");
     return false;
   }
 
@@ -515,18 +526,18 @@ bool ImageReprojection::lookupCameraTransforms(const rclcpp::Time &stamp,
       return false;
     }
 
-    if (camera_frames[i] == output_frame_id_) {
+    if (camera_frames[i] == target_frame) {
       transforms[i].setIdentity();
       continue;
     }
 
     try {
-      const auto transform_msg = tf_buffer_->lookupTransform(camera_frames[i], output_frame_id_, stamp, timeout);
+      const auto transform_msg = tf_buffer_->lookupTransform(camera_frames[i], target_frame, stamp, timeout);
       tf2::fromMsg(transform_msg.transform, transforms[i]);
     } catch (const tf2::TransformException &ex) {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
                            "Failed to lookup transform from '%s' to '%s': %s",
-                           output_frame_id_.c_str(),
+                           target_frame.c_str(),
                            camera_frames[i].c_str(),
                            ex.what());
       return false;
@@ -698,8 +709,8 @@ bool ImageReprojection::reprojectEquirectangular(const std::vector<BgrImage> &in
       }
 
       for (size_t channel = 0; channel < 3; ++channel) {
-        const float blended_value = static_cast<float>((1.0 - overlap_blend_factor_) * dominant_colour[channel] +
-                                                      overlap_blend_factor_ * average_colour[channel]);
+        const float blended_value = static_cast<float>((1.0 - planar_blend_factor_) * dominant_colour[channel] +
+                                                      planar_blend_factor_ * average_colour[channel]);
         pixel[channel] = static_cast<uint8_t>(std::clamp(blended_value, 0.0f, 255.0f));
       }
     }
@@ -913,9 +924,9 @@ bool ImageReprojection::reprojectPlanar(const std::vector<BgrImage> &input_image
 
     for (int v = 0; v < height; ++v) {
       for (int u = 0; u < width; ++u) {
-        const tf2::Vector3 point_virtual(x_norm[u] * projection_depth_,
-                                         y_norm[v] * projection_depth_,
-                                         projection_depth_);
+        const tf2::Vector3 point_virtual(x_norm[u] * planar_depth_,
+                                         y_norm[v] * planar_depth_,
+                                         planar_depth_);
         const tf2::Vector3 point_input = transform * point_virtual;
 
         const double z = point_input.z();
@@ -1008,8 +1019,8 @@ bool ImageReprojection::reprojectPlanar(const std::vector<BgrImage> &input_image
       }
 
       for (size_t channel = 0; channel < 3; ++channel) {
-        const float blended_value = static_cast<float>((1.0 - overlap_blend_factor_) * dominant_colour[channel] +
-                                                      overlap_blend_factor_ * average_colour[channel]);
+        const float blended_value = static_cast<float>((1.0 - equirect_blend_factor_) * dominant_colour[channel] +
+                                                      equirect_blend_factor_ * average_colour[channel]);
         pixel[channel] = static_cast<uint8_t>(std::clamp(blended_value, 0.0f, 255.0f));
       }
     }
