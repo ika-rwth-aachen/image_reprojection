@@ -183,6 +183,8 @@ void ImageReprojection::loadParameters() {
     equirect_blend_factor_ = std::clamp(equirect_blend_factor_, 0.0, 1.0);
   }
 
+  recompute_every_frame_ = this->declare_parameter<bool>("params.recompute_every_frame", false);
+
   const auto image_topics = this->declare_parameter<std::vector<std::string>>("input.image_topics", std::vector<std::string>{});
   if (image_topics.empty()) {
     throw std::runtime_error("input.image_topics must contain at least one topic");
@@ -226,32 +228,32 @@ void ImageReprojection::setupSubscriptions() {
     throw std::runtime_error("No input cameras configured");
   }
 
-  camera_bundles_.clear();
-  camera_bundles_.resize(input_configs_.size());
-
   auto sensor_qos = rclcpp::SensorDataQoS();
-  auto info_qos = rclcpp::QoS(10);
-  info_qos.reliability(RMW_QOS_POLICY_RELIABILITY_RELIABLE);
+  auto info_qos = rclcpp::QoS(10).reliability(RMW_QOS_POLICY_RELIABILITY_RELIABLE);
 
-  for (size_t i = 0; i < input_configs_.size(); ++i) {
-    auto &bundle = camera_bundles_[i];
-    bundle.image_subscriber = std::make_shared<message_filters::Subscriber<Image>>(
-        this, input_configs_[i].image_topic, sensor_qos.get_rmw_qos_profile());
-    bundle.info_subscriber = std::make_shared<message_filters::Subscriber<CameraInfo>>(
-        this, input_configs_[i].camera_info_topic, info_qos.get_rmw_qos_profile());
+  const size_t n = input_configs_.size();
+  image_subs_.resize(n);
+  info_subs_.resize(n);
+  static_intrinsics_.assign(n, CameraIntrinsics{});
+  camera_frame_ids_.assign(n, std::string{});
+  intrinsics_ready_.assign(n, false);
+  cached_planar_transforms_.assign(n, tf2::Transform::getIdentity());
+  cached_equirect_transforms_.assign(n, tf2::Transform::getIdentity());
+  planar_tf_ready_.assign(n, false);
+  equirect_tf_ready_.assign(n, false);
 
-    bundle.synchronizer = std::make_shared<message_filters::Synchronizer<CameraSyncPolicy>>(
-        CameraSyncPolicy(sync_queue_size_), *bundle.image_subscriber, *bundle.info_subscriber);
+  for (size_t i = 0; i < n; ++i) {
+    const auto idx = i;
+    image_subs_[i] = this->create_subscription<Image>(
+        input_configs_[i].image_topic, sensor_qos,
+        [this, idx](const Image::ConstSharedPtr msg) { this->imageCallback(idx, msg); });
 
-    bundle.synchronizer->registerCallback(
-        [this, index = i](const Image::ConstSharedPtr &image,
-                          const CameraInfo::ConstSharedPtr &info,
-                          const auto &...) {
-          handleCameraUpdate(index, image, info);
-        });
+    info_subs_[i] = this->create_subscription<CameraInfo>(
+        input_configs_[i].camera_info_topic, info_qos,
+        [this, idx](const CameraInfo::ConstSharedPtr msg) { this->cameraInfoCallback(idx, msg); });
 
     RCLCPP_INFO(get_logger(),
-                "Subscribed to image '%s' and camera info '%s'",
+                "Subscribed to image '%s' and camera_info '%s'",
                 input_configs_[i].image_topic.c_str(),
                 input_configs_[i].camera_info_topic.c_str());
   }
@@ -274,6 +276,14 @@ void ImageReprojection::configurePlanarCameraInfo() {
   planar_camera_info_.roi.height = 0;
   planar_camera_info_.roi.width = 0;
   planar_camera_info_.roi.do_rectify = false;
+
+  // Precompute target-frame normalized directions once
+  planar_x_norm_.resize(planar_width_);
+  planar_y_norm_.resize(planar_height_);
+  const double inv_fx = 1.0 / planar_fx_;
+  const double inv_fy = 1.0 / planar_fy_;
+  for (int u = 0; u < planar_width_; ++u) planar_x_norm_[u] = (static_cast<double>(u) - planar_cx_) * inv_fx;
+  for (int v = 0; v < planar_height_; ++v) planar_y_norm_[v] = (static_cast<double>(v) - planar_cy_) * inv_fy;
 }
 
 void ImageReprojection::configureEquirectCameraInfo() {
@@ -295,11 +305,27 @@ void ImageReprojection::configureEquirectCameraInfo() {
   equirect_camera_info_.roi.height = 0;
   equirect_camera_info_.roi.width = 0;
   equirect_camera_info_.roi.do_rectify = false;
+
+  // Precompute spherical directions tables for performance
+  equirect_sin_lat_.resize(equirect_height_);
+  equirect_cos_lat_.resize(equirect_height_);
+  equirect_sin_lon_.resize(equirect_width_);
+  equirect_cos_lon_.resize(equirect_width_);
+  for (int v = 0; v < equirect_height_; ++v) {
+    const double v_norm = (static_cast<double>(v) + 0.5) / static_cast<double>(equirect_height_);
+    const double lat = (0.5 - v_norm) * equirect_vfov_rad_;
+    equirect_sin_lat_[v] = std::sin(lat);
+    equirect_cos_lat_[v] = std::cos(lat);
+  }
+  for (int u = 0; u < equirect_width_; ++u) {
+    const double u_norm = (static_cast<double>(u) + 0.5) / static_cast<double>(equirect_width_);
+    const double lon = (u_norm - 0.5) * equirect_hfov_rad_;
+    equirect_sin_lon_[u] = std::sin(lon);
+    equirect_cos_lon_[u] = std::cos(lon);
+  }
 }
 
-void ImageReprojection::handleCameraUpdate(size_t index,
-                                           const Image::ConstSharedPtr &image,
-                                           const CameraInfo::ConstSharedPtr &info) {
+void ImageReprojection::imageCallback(size_t index, const Image::ConstSharedPtr &image) {
   const auto start_time = this->now();
 
   if (index >= input_configs_.size()) {
@@ -312,8 +338,8 @@ void ImageReprojection::handleCameraUpdate(size_t index,
     return;
   }
 
-  CameraIntrinsics intrinsics;
-  if (!extractIntrinsics(info, intrinsics, get_logger())) {
+  if (!intrinsics_ready_[index]) {
+    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "Ignoring image for cam %zu until CameraInfo is received", index);
     return;
   }
 
@@ -355,28 +381,28 @@ void ImageReprojection::handleCameraUpdate(size_t index,
   const int64_t frame_key = selected_it->first;
 
   frame.images[index] = std::move(converted_image);
-  frame.intrinsics[index] = intrinsics;
-  frame.frame_ids[index] = info->header.frame_id;
+  frame.intrinsics[index] = static_intrinsics_[index];
+  frame.frame_ids[index] = camera_frame_ids_[index];
   frame.ready[index] = true;
 
   const size_t ready_count = static_cast<size_t>(std::count(frame.ready.begin(), frame.ready.end(), true));
   const bool frame_ready = ready_count == frame.ready.size();
   if (!frame_ready) {
-    RCLCPP_INFO(get_logger(),
-                "Frame %ld: %zu/%zu cameras ready (latest camera %zu, stamp %.3f s)",
-                frame_key,
-                ready_count,
-                frame.ready.size(),
-                index,
-                stamp.seconds());
+    RCLCPP_DEBUG(get_logger(),
+                 "Frame %ld: %zu/%zu cameras ready (latest camera %zu, stamp %.3f s)",
+                 frame_key,
+                 ready_count,
+                 frame.ready.size(),
+                 index,
+                 stamp.seconds());
     cleanupAccumulators(stamp);
     return;
   }
 
-  RCLCPP_INFO(get_logger(),
-              "Frame %ld: all %zu cameras ready (processing)",
-              frame_key,
-              frame.images.size());
+  RCLCPP_DEBUG(get_logger(),
+               "Frame %ld: all %zu cameras ready (processing)",
+               frame_key,
+               frame.images.size());
 
   const std::string fallback_frame = frame.frame_ids.front();
 
@@ -431,7 +457,10 @@ void ImageReprojection::handleCameraUpdate(size_t index,
 
   if (enable_planar_ && planar_transforms_valid) {
     sensor_msgs::msg::Image planar_output;
-    if (reprojectPlanar(images, frame.intrinsics, planar_transforms, planar_output)) {
+    const auto planar_t0 = this->now();
+    const bool planar_ok = reprojectPlanar(images, frame.intrinsics, planar_transforms, planar_output);
+    const double planar_ms = static_cast<double>((this->now() - planar_t0).nanoseconds()) / 1e6;
+    if (planar_ok) {
       planar_output.header.stamp = frame.stamp;
       planar_output.header.frame_id = planar_frame_id_;
       auto planar_info = planar_camera_info_;
@@ -441,14 +470,18 @@ void ImageReprojection::handleCameraUpdate(size_t index,
       planar_image_publisher_->publish(planar_output);
       planar_info_publisher_->publish(planar_info);
       planar_success = true;
+      RCLCPP_INFO(get_logger(), "Frame %ld planar projection in %.2f ms", frame_key, planar_ms);
     } else {
-      RCLCPP_WARN(get_logger(), "Frame %ld planar reprojection failed", frame_key);
+      RCLCPP_WARN(get_logger(), "Frame %ld planar reprojection failed (%.2f ms)", frame_key, planar_ms);
     }
   }
 
   if (enable_equirectangular_ && equirect_transforms_valid) {
     sensor_msgs::msg::Image equirect_output;
-    if (reprojectEquirectangular(images, frame.intrinsics, equirect_transforms, equirect_output)) {
+    const auto eq_t0 = this->now();
+    const bool eq_ok = reprojectEquirectangular(images, frame.intrinsics, equirect_transforms, equirect_output);
+    const double eq_ms = static_cast<double>((this->now() - eq_t0).nanoseconds()) / 1e6;
+    if (eq_ok) {
       equirect_output.header.stamp = frame.stamp;
       equirect_output.header.frame_id = equirect_frame_id_;
       auto equirect_info = equirect_camera_info_;
@@ -458,8 +491,9 @@ void ImageReprojection::handleCameraUpdate(size_t index,
       equirect_image_publisher_->publish(equirect_output);
       equirect_info_publisher_->publish(equirect_info);
       equirect_success = true;
+      RCLCPP_INFO(get_logger(), "Frame %ld equirectangular projection in %.2f ms", frame_key, eq_ms);
     } else {
-      RCLCPP_WARN(get_logger(), "Frame %ld equirectangular reprojection failed", frame_key);
+      RCLCPP_WARN(get_logger(), "Frame %ld equirectangular reprojection failed (%.2f ms)", frame_key, eq_ms);
     }
   }
 
@@ -547,6 +581,39 @@ bool ImageReprojection::lookupCameraTransforms(const rclcpp::Time &stamp,
   return true;
 }
 
+void ImageReprojection::cameraInfoCallback(size_t index, const CameraInfo::ConstSharedPtr &info) {
+  if (index >= input_configs_.size()) return;
+  CameraIntrinsics intr;
+  if (!extractIntrinsics(info, intr, get_logger())) return;
+  static_intrinsics_[index] = intr;
+  camera_frame_ids_[index] = info->header.frame_id;
+  intrinsics_ready_[index] = true;
+
+  // If target frames are not set, pick this one as default
+  if (enable_planar_ && planar_frame_id_.empty()) planar_frame_id_ = camera_frame_ids_[index];
+  if (enable_equirectangular_ && equirect_frame_id_.empty()) equirect_frame_id_ = camera_frame_ids_[index];
+
+  // Cache static transforms if possible (time 0)
+  if (enable_planar_ && !planar_frame_id_.empty()) {
+    try {
+      const auto tf_msg = tf_buffer_->lookupTransform(camera_frame_ids_[index], planar_frame_id_, rclcpp::Time(0), tf2::durationFromSec(transform_timeout_sec_));
+      tf2::fromMsg(tf_msg.transform, cached_planar_transforms_[index]);
+      planar_tf_ready_[index] = true;
+    } catch (const tf2::TransformException &ex) {
+      RCLCPP_DEBUG(get_logger(), "Planar transform not yet available for cam %zu: %s", index, ex.what());
+    }
+  }
+  if (enable_equirectangular_ && !equirect_frame_id_.empty()) {
+    try {
+      const auto tf_msg = tf_buffer_->lookupTransform(camera_frame_ids_[index], equirect_frame_id_, rclcpp::Time(0), tf2::durationFromSec(transform_timeout_sec_));
+      tf2::fromMsg(tf_msg.transform, cached_equirect_transforms_[index]);
+      equirect_tf_ready_[index] = true;
+    } catch (const tf2::TransformException &ex) {
+      RCLCPP_DEBUG(get_logger(), "Equirect transform not yet available for cam %zu: %s", index, ex.what());
+    }
+  }
+}
+
 bool ImageReprojection::reprojectEquirectangular(const std::vector<BgrImage> &input_images,
                                                  const std::vector<CameraIntrinsics> &intrinsics,
                                                  const std::vector<tf2::Transform> &transforms,
@@ -602,16 +669,12 @@ bool ImageReprojection::reprojectEquirectangular(const std::vector<BgrImage> &in
     auto &weight_buffer = weights[i];
 
     for (int v = 0; v < height; ++v) {
-      const double v_norm = (static_cast<double>(v) + 0.5) / static_cast<double>(height);
-      const double lat = (0.5 - v_norm) * equirect_vfov_rad_;
-      const double sin_lat = std::sin(lat);
-      const double cos_lat = std::cos(lat);
+      const double sin_lat = equirect_sin_lat_[v];
+      const double cos_lat = equirect_cos_lat_[v];
 
       for (int u = 0; u < width; ++u) {
-        const double u_norm = (static_cast<double>(u) + 0.5) / static_cast<double>(width);
-        const double lon = (u_norm - 0.5) * equirect_hfov_rad_;
-        const double sin_lon = std::sin(lon);
-        const double cos_lon = std::cos(lon);
+        const double sin_lon = equirect_sin_lon_[u];
+        const double cos_lon = equirect_cos_lon_[u];
 
         tf2::Vector3 direction(cos_lat * sin_lon,
                                -sin_lat,
@@ -887,16 +950,8 @@ bool ImageReprojection::reprojectPlanar(const std::vector<BgrImage> &input_image
     weights.emplace_back(pixel_count, 0.0f);
   }
 
-  std::vector<double> x_norm(width);
-  std::vector<double> y_norm(height);
-  const double inv_fx = 1.0 / planar_fx_;
-  const double inv_fy = 1.0 / planar_fy_;
-  for (int u = 0; u < width; ++u) {
-    x_norm[u] = (static_cast<double>(u) - planar_cx_) * inv_fx;
-  }
-  for (int v = 0; v < height; ++v) {
-    y_norm[v] = (static_cast<double>(v) - planar_cy_) * inv_fy;
-  }
+  const auto &x_norm = planar_x_norm_;
+  const auto &y_norm = planar_y_norm_;
 
   for (size_t i = 0; i < input_images.size(); ++i) {
     const auto &intr = intrinsics[i];

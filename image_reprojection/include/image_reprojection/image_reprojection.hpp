@@ -6,9 +6,7 @@
 #include <string>
 #include <vector>
 
-#include <message_filters/subscriber.h>
-#include <message_filters/synchronizer.h>
-#include <message_filters/sync_policies/approximate_time.h>
+// message_filters no longer used for per-camera pairs; kept out to simplify deps
 
 #include <rclcpp/rclcpp.hpp>
 
@@ -58,21 +56,14 @@ class ImageReprojection : public rclcpp::Node {
 
   using Image = sensor_msgs::msg::Image;
   using CameraInfo = sensor_msgs::msg::CameraInfo;
-  using CameraSyncPolicy = message_filters::sync_policies::ApproximateTime<Image, CameraInfo>;
-
-  struct CameraBundle {
-    std::shared_ptr<message_filters::Subscriber<Image>> image_subscriber;
-    std::shared_ptr<message_filters::Subscriber<CameraInfo>> info_subscriber;
-    std::shared_ptr<message_filters::Synchronizer<CameraSyncPolicy>> synchronizer;
-  };
+  // No message_filters bundles; subscribe separately to images and camera infos
 
   void loadParameters();
   void setupSubscriptions();
   void configurePlanarCameraInfo();
   void configureEquirectCameraInfo();
-  void handleCameraUpdate(size_t index,
-                          const Image::ConstSharedPtr &image,
-                          const CameraInfo::ConstSharedPtr &info);
+  void imageCallback(size_t index, const Image::ConstSharedPtr &image);
+  void cameraInfoCallback(size_t index, const CameraInfo::ConstSharedPtr &info);
   void cleanupAccumulators(const rclcpp::Time &current_stamp);
 
   bool lookupCameraTransforms(const rclcpp::Time &stamp,
@@ -122,11 +113,31 @@ class ImageReprojection : public rclcpp::Node {
   double transform_timeout_sec_{0.05};
   double accumulator_timeout_sec_{1.0};
   double frame_time_tolerance_sec_{0.005};
+  bool recompute_every_frame_{false};
+
+  // Cached per-projection direction tables (target frame)
+  std::vector<double> planar_x_norm_;
+  std::vector<double> planar_y_norm_;
+  std::vector<double> equirect_sin_lat_;
+  std::vector<double> equirect_cos_lat_;
+  std::vector<double> equirect_sin_lon_;
+  std::vector<double> equirect_cos_lon_;
+
+  // Camera static info and transforms
+  std::vector<CameraIntrinsics> static_intrinsics_;
+  std::vector<std::string> camera_frame_ids_;
+  std::vector<bool> intrinsics_ready_;
+  std::vector<tf2::Transform> cached_planar_transforms_;
+  std::vector<tf2::Transform> cached_equirect_transforms_;
+  std::vector<bool> planar_tf_ready_;
+  std::vector<bool> equirect_tf_ready_;
 
   sensor_msgs::msg::CameraInfo planar_camera_info_{};
   sensor_msgs::msg::CameraInfo equirect_camera_info_{};
 
-  std::vector<CameraBundle> camera_bundles_{};
+  // Subscriptions
+  std::vector<rclcpp::Subscription<Image>::SharedPtr> image_subs_{};
+  std::vector<rclcpp::Subscription<CameraInfo>::SharedPtr> info_subs_{};
   std::map<int64_t, FrameAccumulator> frame_accumulators_{};
 
   rclcpp::Publisher<Image>::SharedPtr planar_image_publisher_{};
