@@ -4,7 +4,7 @@
 
   <name>image_reprojection</name>
   <version>0.0.0</version>
-  <description>Reprojects multiple camera images to the image plane of a virtual output camera</description>
+  <description>Reprojects multiple camera images using various projection methods</description>
 
   <maintainer email="lennart.reiher@ika.rwth-aachen.de">Lennart Reiher</maintainer>
   <author email="lennart.reiher@ika.rwth-aachen.de">Lennart Reiher</author>

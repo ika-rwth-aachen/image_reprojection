@@ -239,6 +239,14 @@ void ImageReprojection::setupSubscriptions() {
   cached_equirect_transforms_.assign(n, tf2::Transform::getIdentity());
   planar_tf_ready_.assign(n, false);
   equirect_tf_ready_.assign(n, false);
+  planar_warp_maps_.assign(n, {});
+  equirect_warp_maps_.assign(n, {});
+  planar_warp_ready_.assign(n, false);
+  equirect_warp_ready_.assign(n, false);
+  planar_accumulators_.assign(n, {});
+  planar_weights_.assign(n, {});
+  equirect_accumulators_.assign(n, {});
+  equirect_weights_.assign(n, {});
 
   image_transport::ImageTransport it(this->shared_from_this());
 
@@ -424,7 +432,7 @@ void ImageReprojection::imageCallback(size_t index, const Image::ConstSharedPtr 
   std::vector<tf2::Transform> planar_transforms;
   bool planar_transforms_valid = false;
   if (enable_planar_) {
-    planar_transforms_valid = lookupCameraTransforms(frame.stamp, frame.frame_ids, planar_frame_id_, planar_transforms);
+    planar_transforms_valid = lookupCameraTransforms(frame.stamp, frame.frame_ids, planar_frame_id_, planar_transforms, true);
     if (!planar_transforms_valid) {
       RCLCPP_WARN(get_logger(), "Frame %ld dropped: missing transforms for planar target '%s'",
                   frame_key,
@@ -439,7 +447,7 @@ void ImageReprojection::imageCallback(size_t index, const Image::ConstSharedPtr 
       equirect_transforms = planar_transforms;
       equirect_transforms_valid = true;
     } else {
-      equirect_transforms_valid = lookupCameraTransforms(frame.stamp, frame.frame_ids, equirect_frame_id_, equirect_transforms);
+      equirect_transforms_valid = lookupCameraTransforms(frame.stamp, frame.frame_ids, equirect_frame_id_, equirect_transforms, false);
       if (!equirect_transforms_valid) {
         RCLCPP_WARN(get_logger(), "Frame %ld dropped: missing transforms for equirectangular target '%s'",
                     frame_key,
@@ -548,7 +556,8 @@ void ImageReprojection::cleanupAccumulators(const rclcpp::Time &current_stamp) {
 bool ImageReprojection::lookupCameraTransforms(const rclcpp::Time &stamp,
                                                const std::vector<std::string> &camera_frames,
                                                const std::string &target_frame,
-                                               std::vector<tf2::Transform> &transforms) {
+                                               std::vector<tf2::Transform> &transforms,
+                                               bool planar_projection) {
   if (!tf_buffer_) {
     RCLCPP_ERROR(get_logger(), "TF buffer is not initialised.");
     return false;
@@ -560,7 +569,25 @@ bool ImageReprojection::lookupCameraTransforms(const rclcpp::Time &stamp,
   }
 
   transforms.resize(camera_frames.size());
+
+  auto &cached_transforms = planar_projection ? cached_planar_transforms_ : cached_equirect_transforms_;
+  auto &cache_ready = planar_projection ? planar_tf_ready_ : equirect_tf_ready_;
+  const bool use_cache = !recompute_every_frame_;
   const tf2::Duration timeout = tf2::durationFromSec(transform_timeout_sec_);
+
+  if (use_cache) {
+    bool fully_cached = true;
+    for (size_t i = 0; i < camera_frames.size(); ++i) {
+      if (!cache_ready[i]) {
+        fully_cached = false;
+        break;
+      }
+    }
+    if (fully_cached) {
+      std::copy(cached_transforms.begin(), cached_transforms.end(), transforms.begin());
+      return true;
+    }
+  }
 
   for (size_t i = 0; i < camera_frames.size(); ++i) {
     if (camera_frames[i].empty()) {
@@ -570,12 +597,36 @@ bool ImageReprojection::lookupCameraTransforms(const rclcpp::Time &stamp,
 
     if (camera_frames[i] == target_frame) {
       transforms[i].setIdentity();
+      if (use_cache) {
+        cached_transforms[i] = transforms[i];
+        cache_ready[i] = true;
+        if (planar_projection) {
+          updatePlanarWarpCache(i);
+        } else {
+          updateEquirectWarpCache(i);
+        }
+      }
+      continue;
+    }
+
+    if (use_cache && cache_ready[i]) {
+      transforms[i] = cached_transforms[i];
       continue;
     }
 
     try {
-      const auto transform_msg = tf_buffer_->lookupTransform(camera_frames[i], target_frame, stamp, timeout);
+      const rclcpp::Time lookup_time = recompute_every_frame_ ? stamp : rclcpp::Time(0);
+      const auto transform_msg = tf_buffer_->lookupTransform(camera_frames[i], target_frame, lookup_time, timeout);
       tf2::fromMsg(transform_msg.transform, transforms[i]);
+      if (use_cache) {
+        cached_transforms[i] = transforms[i];
+        cache_ready[i] = true;
+        if (planar_projection) {
+          updatePlanarWarpCache(i);
+        } else {
+          updateEquirectWarpCache(i);
+        }
+      }
     } catch (const tf2::TransformException &ex) {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
                            "Failed to lookup transform from '%s' to '%s': %s",
@@ -607,6 +658,7 @@ void ImageReprojection::cameraInfoCallback(size_t index, const CameraInfo::Const
       const auto tf_msg = tf_buffer_->lookupTransform(camera_frame_ids_[index], planar_frame_id_, rclcpp::Time(0), tf2::durationFromSec(transform_timeout_sec_));
       tf2::fromMsg(tf_msg.transform, cached_planar_transforms_[index]);
       planar_tf_ready_[index] = true;
+      updatePlanarWarpCache(index);
     } catch (const tf2::TransformException &ex) {
       RCLCPP_DEBUG(get_logger(), "Planar transform not yet available for cam %zu: %s", index, ex.what());
     }
@@ -616,8 +668,218 @@ void ImageReprojection::cameraInfoCallback(size_t index, const CameraInfo::Const
       const auto tf_msg = tf_buffer_->lookupTransform(camera_frame_ids_[index], equirect_frame_id_, rclcpp::Time(0), tf2::durationFromSec(transform_timeout_sec_));
       tf2::fromMsg(tf_msg.transform, cached_equirect_transforms_[index]);
       equirect_tf_ready_[index] = true;
+      updateEquirectWarpCache(index);
     } catch (const tf2::TransformException &ex) {
       RCLCPP_DEBUG(get_logger(), "Equirect transform not yet available for cam %zu: %s", index, ex.what());
+    }
+  }
+}
+
+void ImageReprojection::updatePlanarWarpCache(size_t index) {
+  if (!enable_planar_ || recompute_every_frame_) {
+    return;
+  }
+  if (index >= input_configs_.size()) {
+    return;
+  }
+  planar_warp_ready_[index] = false;
+  if (!intrinsics_ready_[index] || !planar_tf_ready_[index]) {
+    return;
+  }
+
+  const int width = planar_width_;
+  const int height = planar_height_;
+  if (width <= 0 || height <= 0) {
+    return;
+  }
+
+  const size_t pixel_count = static_cast<size_t>(width) * height;
+  auto &mapping = planar_warp_maps_[index];
+  mapping.resize(pixel_count);
+
+  const auto &intr = static_intrinsics_[index];
+  const tf2::Transform &transform = cached_planar_transforms_[index];
+  const double fx_in = intr.fx;
+  const double fy_in = intr.fy;
+  const double cx_in = intr.cx;
+  const double cy_in = intr.cy;
+  const int width_in = intr.width;
+  const int height_in = intr.height;
+
+  const auto &x_norm = planar_x_norm_;
+  const auto &y_norm = planar_y_norm_;
+
+  for (int v = 0; v < height; ++v) {
+    for (int u = 0; u < width; ++u) {
+      const size_t pixel_index = static_cast<size_t>(v) * width + u;
+      auto &entry = mapping[pixel_index];
+
+      const tf2::Vector3 point_virtual(x_norm[u] * planar_depth_,
+                                       y_norm[v] * planar_depth_,
+                                       planar_depth_);
+      const tf2::Vector3 point_input = transform * point_virtual;
+
+      const double z = point_input.z();
+      if (z <= kEpsilon) {
+        entry = PixelMapping{};
+        continue;
+      }
+
+      const double inv_z = 1.0 / z;
+      const double u_in = fx_in * (point_input.x() * inv_z) + cx_in;
+      const double v_in = fy_in * (point_input.y() * inv_z) + cy_in;
+
+      if (u_in < 0.0 || u_in > static_cast<double>(width_in - 1) ||
+          v_in < 0.0 || v_in > static_cast<double>(height_in - 1)) {
+        entry = PixelMapping{};
+        continue;
+      }
+
+      entry.u = static_cast<float>(u_in);
+      entry.v = static_cast<float>(v_in);
+    }
+  }
+
+  planar_warp_ready_[index] = true;
+}
+
+void ImageReprojection::updateEquirectWarpCache(size_t index) {
+  if (!enable_equirectangular_ || recompute_every_frame_) {
+    return;
+  }
+  if (index >= input_configs_.size()) {
+    return;
+  }
+  equirect_warp_ready_[index] = false;
+  if (!intrinsics_ready_[index] || !equirect_tf_ready_[index]) {
+    return;
+  }
+
+  const int width = equirect_width_;
+  const int height = equirect_height_;
+  if (width <= 0 || height <= 0) {
+    return;
+  }
+
+  const size_t pixel_count = static_cast<size_t>(width) * height;
+  auto &mapping = equirect_warp_maps_[index];
+  mapping.resize(pixel_count);
+
+  const auto &intr = static_intrinsics_[index];
+  const tf2::Transform &transform = cached_equirect_transforms_[index];
+  const double fx_in = intr.fx;
+  const double fy_in = intr.fy;
+  const double cx_in = intr.cx;
+  const double cy_in = intr.cy;
+  const int width_in = intr.width;
+  const int height_in = intr.height;
+
+  for (int v = 0; v < height; ++v) {
+    const double sin_lat = equirect_sin_lat_[v];
+    const double cos_lat = equirect_cos_lat_[v];
+
+    for (int u = 0; u < width; ++u) {
+      const size_t pixel_index = static_cast<size_t>(v) * width + u;
+      auto &entry = mapping[pixel_index];
+      const double sin_lon = equirect_sin_lon_[u];
+      const double cos_lon = equirect_cos_lon_[u];
+
+      tf2::Vector3 direction(cos_lat * sin_lon,
+                             -sin_lat,
+                             cos_lat * cos_lon);
+      const tf2::Vector3 point_virtual = direction * equirect_radius_;
+      const tf2::Vector3 point_input = transform * point_virtual;
+
+      const double z = point_input.z();
+      if (z <= kEpsilon) {
+        entry = PixelMapping{};
+        continue;
+      }
+
+      const double inv_z = 1.0 / z;
+      const double u_in = fx_in * (point_input.x() * inv_z) + cx_in;
+      const double v_in = fy_in * (point_input.y() * inv_z) + cy_in;
+
+      if (u_in < 0.0 || u_in > static_cast<double>(width_in - 1) ||
+          v_in < 0.0 || v_in > static_cast<double>(height_in - 1)) {
+        entry = PixelMapping{};
+        continue;
+      }
+
+      entry.u = static_cast<float>(u_in);
+      entry.v = static_cast<float>(v_in);
+    }
+  }
+
+  equirect_warp_ready_[index] = true;
+}
+
+void ImageReprojection::preparePlanarScratchBuffers(size_t camera_count) const {
+  if (!enable_planar_) {
+    return;
+  }
+  const int width = planar_width_;
+  const int height = planar_height_;
+  if (width <= 0 || height <= 0) {
+    return;
+  }
+
+  const size_t pixel_count = static_cast<size_t>(width) * height;
+  if (planar_accumulators_.size() != camera_count) {
+    planar_accumulators_.resize(camera_count);
+  }
+  if (planar_weights_.size() != camera_count) {
+    planar_weights_.resize(camera_count);
+  }
+
+  for (size_t i = 0; i < camera_count; ++i) {
+    auto &acc = planar_accumulators_[i];
+    auto &weights = planar_weights_[i];
+    const size_t acc_size = pixel_count * 3;
+    if (acc.size() != acc_size) {
+      acc.assign(acc_size, 0.0f);
+    } else {
+      std::fill(acc.begin(), acc.end(), 0.0f);
+    }
+    if (weights.size() != pixel_count) {
+      weights.assign(pixel_count, 0.0f);
+    } else {
+      std::fill(weights.begin(), weights.end(), 0.0f);
+    }
+  }
+}
+
+void ImageReprojection::prepareEquirectScratchBuffers(size_t camera_count) const {
+  if (!enable_equirectangular_) {
+    return;
+  }
+  const int width = equirect_width_;
+  const int height = equirect_height_;
+  if (width <= 0 || height <= 0) {
+    return;
+  }
+
+  const size_t pixel_count = static_cast<size_t>(width) * height;
+  if (equirect_accumulators_.size() != camera_count) {
+    equirect_accumulators_.resize(camera_count);
+  }
+  if (equirect_weights_.size() != camera_count) {
+    equirect_weights_.resize(camera_count);
+  }
+
+  for (size_t i = 0; i < camera_count; ++i) {
+    auto &acc = equirect_accumulators_[i];
+    auto &weights = equirect_weights_[i];
+    const size_t acc_size = pixel_count * 3;
+    if (acc.size() != acc_size) {
+      acc.assign(acc_size, 0.0f);
+    } else {
+      std::fill(acc.begin(), acc.end(), 0.0f);
+    }
+    if (weights.size() != pixel_count) {
+      weights.assign(pixel_count, 0.0f);
+    } else {
+      std::fill(weights.begin(), weights.end(), 0.0f);
     }
   }
 }
@@ -641,22 +903,67 @@ bool ImageReprojection::reprojectEquirectangular(const std::vector<BgrImage> &in
   const int width = equirect_width_;
   const int height = equirect_height_;
   const size_t pixel_count = static_cast<size_t>(height) * width;
+  const size_t camera_count = input_images.size();
 
-  std::vector<std::vector<float>> accumulators;
-  accumulators.reserve(input_images.size());
-  std::vector<std::vector<float>> weights;
-  weights.reserve(input_images.size());
+  prepareEquirectScratchBuffers(camera_count);
+  auto &accumulators = equirect_accumulators_;
+  auto &weights = equirect_weights_;
 
-  for (size_t i = 0; i < input_images.size(); ++i) {
-    accumulators.emplace_back(pixel_count * 3, 0.0f);
-    weights.emplace_back(pixel_count, 0.0f);
+  bool use_precomputed = !recompute_every_frame_;
+  if (use_precomputed) {
+    if (equirect_warp_maps_.size() < camera_count) {
+      use_precomputed = false;
+    }
+    for (size_t i = 0; i < camera_count && use_precomputed; ++i) {
+      if (i >= equirect_warp_ready_.size() || !equirect_warp_ready_[i]) {
+        use_precomputed = false;
+        break;
+      }
+      if (equirect_warp_maps_[i].size() != pixel_count) {
+        use_precomputed = false;
+        break;
+      }
+      if (intrinsics[i].width != input_images[i].width ||
+          intrinsics[i].height != input_images[i].height) {
+        use_precomputed = false;
+        break;
+      }
+    }
   }
 
-  for (size_t i = 0; i < input_images.size(); ++i) {
+  for (size_t i = 0; i < camera_count; ++i) {
     const auto &intr = intrinsics[i];
     const BgrImage &image = input_images[i];
-    const tf2::Transform &transform = transforms[i];
+    auto &acc = accumulators[i];
+    auto &weight_buffer = weights[i];
 
+    if (use_precomputed) {
+      const auto &mapping = equirect_warp_maps_[i];
+      const int width_in = image.width;
+      const int height_in = image.height;
+      const double max_u = static_cast<double>(width_in - 1);
+      const double max_v = static_cast<double>(height_in - 1);
+
+      for (size_t pixel_index = 0; pixel_index < pixel_count; ++pixel_index) {
+        const auto &entry = mapping[pixel_index];
+        if (!std::isfinite(entry.u) || !std::isfinite(entry.v)) {
+          continue;
+        }
+        if (entry.u < 0.0f || entry.u > max_u || entry.v < 0.0f || entry.v > max_v) {
+          continue;
+        }
+
+        const std::array<float, 3> colour = bilinearSample(image, static_cast<double>(entry.u), static_cast<double>(entry.v));
+        const size_t base_index = pixel_index * 3;
+        acc[base_index + 0] += colour[0];
+        acc[base_index + 1] += colour[1];
+        acc[base_index + 2] += colour[2];
+        weight_buffer[pixel_index] += 1.0f;
+      }
+      continue;
+    }
+
+    const tf2::Transform &transform = transforms[i];
     const double fx_in = intr.fx;
     const double fy_in = intr.fy;
     const double cx_in = intr.cx;
@@ -672,9 +979,6 @@ bool ImageReprojection::reprojectEquirectangular(const std::vector<BgrImage> &in
                        width_in,
                        height_in);
     }
-
-    auto &acc = accumulators[i];
-    auto &weight_buffer = weights[i];
 
     for (int v = 0; v < height; ++v) {
       const double sin_lat = equirect_sin_lat_[v];
@@ -733,6 +1037,8 @@ bool ImageReprojection::reprojectEquirectangular(const std::vector<BgrImage> &in
     return colour;
   };
 
+  const float blend_factor = static_cast<float>(equirect_blend_factor_);
+
   for (int v = 0; v < height; ++v) {
     for (int u = 0; u < width; ++u) {
       const size_t pixel_index = static_cast<size_t>(v) * width + u;
@@ -780,8 +1086,8 @@ bool ImageReprojection::reprojectEquirectangular(const std::vector<BgrImage> &in
       }
 
       for (size_t channel = 0; channel < 3; ++channel) {
-        const float blended_value = static_cast<float>((1.0 - planar_blend_factor_) * dominant_colour[channel] +
-                                                      planar_blend_factor_ * average_colour[channel]);
+        const float blended_value = static_cast<float>((1.0f - blend_factor) * dominant_colour[channel] +
+                                                      blend_factor * average_colour[channel]);
         pixel[channel] = static_cast<uint8_t>(std::clamp(blended_value, 0.0f, 255.0f));
       }
     }
@@ -947,25 +1253,71 @@ bool ImageReprojection::reprojectPlanar(const std::vector<BgrImage> &input_image
   const int width = planar_width_;
   const int height = planar_height_;
   const size_t pixel_count = static_cast<size_t>(height) * width;
+  const size_t camera_count = input_images.size();
 
-  std::vector<std::vector<float>> accumulators;
-  accumulators.reserve(input_images.size());
-  std::vector<std::vector<float>> weights;
-  weights.reserve(input_images.size());
+  preparePlanarScratchBuffers(camera_count);
+  auto &accumulators = planar_accumulators_;
+  auto &weights = planar_weights_;
 
-  for (size_t i = 0; i < input_images.size(); ++i) {
-    accumulators.emplace_back(pixel_count * 3, 0.0f);
-    weights.emplace_back(pixel_count, 0.0f);
+  bool use_precomputed = !recompute_every_frame_;
+  if (use_precomputed) {
+    if (planar_warp_maps_.size() < camera_count) {
+      use_precomputed = false;
+    }
+    for (size_t i = 0; i < camera_count && use_precomputed; ++i) {
+      if (i >= planar_warp_ready_.size() || !planar_warp_ready_[i]) {
+        use_precomputed = false;
+        break;
+      }
+      if (planar_warp_maps_[i].size() != pixel_count) {
+        use_precomputed = false;
+        break;
+      }
+      if (intrinsics[i].width != input_images[i].width ||
+          intrinsics[i].height != input_images[i].height) {
+        use_precomputed = false;
+        break;
+      }
+    }
   }
 
   const auto &x_norm = planar_x_norm_;
   const auto &y_norm = planar_y_norm_;
 
-  for (size_t i = 0; i < input_images.size(); ++i) {
+  for (size_t i = 0; i < camera_count; ++i) {
     const auto &intr = intrinsics[i];
     const BgrImage &image = input_images[i];
-    const tf2::Transform &transform = transforms[i];
+    auto &acc = accumulators[i];
+    auto &weight_buffer = weights[i];
 
+    if (use_precomputed) {
+      const auto &mapping = planar_warp_maps_[i];
+      const int width_in = image.width;
+      const int height_in = image.height;
+      const double max_u = static_cast<double>(width_in - 1);
+      const double max_v = static_cast<double>(height_in - 1);
+
+      for (size_t pixel_index = 0; pixel_index < pixel_count; ++pixel_index) {
+        const auto &entry = mapping[pixel_index];
+        if (!std::isfinite(entry.u) || !std::isfinite(entry.v)) {
+          continue;
+        }
+
+        if (entry.u < 0.0f || entry.u > max_u || entry.v < 0.0f || entry.v > max_v) {
+          continue;
+        }
+
+        const std::array<float, 3> colour = bilinearSample(image, static_cast<double>(entry.u), static_cast<double>(entry.v));
+        const size_t base_index = pixel_index * 3;
+        acc[base_index + 0] += colour[0];
+        acc[base_index + 1] += colour[1];
+        acc[base_index + 2] += colour[2];
+        weight_buffer[pixel_index] += 1.0f;
+      }
+      continue;
+    }
+
+    const tf2::Transform &transform = transforms[i];
     const double fx_in = intr.fx;
     const double fy_in = intr.fy;
     const double cx_in = intr.cx;
@@ -981,9 +1333,6 @@ bool ImageReprojection::reprojectPlanar(const std::vector<BgrImage> &input_image
                        width_in,
                        height_in);
     }
-
-    auto &acc = accumulators[i];
-    auto &weight_buffer = weights[i];
 
     for (int v = 0; v < height; ++v) {
       for (int u = 0; u < width; ++u) {
@@ -1035,6 +1384,8 @@ bool ImageReprojection::reprojectPlanar(const std::vector<BgrImage> &input_image
     return colour;
   };
 
+  const float blend_factor = static_cast<float>(planar_blend_factor_);
+
   for (int v = 0; v < height; ++v) {
     for (int u = 0; u < width; ++u) {
       const size_t pixel_index = static_cast<size_t>(v) * width + u;
@@ -1082,8 +1433,8 @@ bool ImageReprojection::reprojectPlanar(const std::vector<BgrImage> &input_image
       }
 
       for (size_t channel = 0; channel < 3; ++channel) {
-        const float blended_value = static_cast<float>((1.0 - equirect_blend_factor_) * dominant_colour[channel] +
-                                                      equirect_blend_factor_ * average_colour[channel]);
+        const float blended_value = static_cast<float>((1.0f - blend_factor) * dominant_colour[channel] +
+                                                      blend_factor * average_colour[channel]);
         pixel[channel] = static_cast<uint8_t>(std::clamp(blended_value, 0.0f, 255.0f));
       }
     }

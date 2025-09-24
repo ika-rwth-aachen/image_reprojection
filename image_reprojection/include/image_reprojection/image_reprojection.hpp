@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <limits>
 #include <map>
 #include <memory>
 #include <string>
@@ -54,6 +55,11 @@ class ImageReprojection : public rclcpp::Node {
     std::vector<std::string> frame_ids;
   };
 
+  struct PixelMapping {
+    float u{std::numeric_limits<float>::quiet_NaN()};
+    float v{std::numeric_limits<float>::quiet_NaN()};
+  };
+
   using Image = sensor_msgs::msg::Image;
   using CameraInfo = sensor_msgs::msg::CameraInfo;
   // No message_filters bundles; subscribe separately to images and camera infos
@@ -69,7 +75,8 @@ class ImageReprojection : public rclcpp::Node {
   bool lookupCameraTransforms(const rclcpp::Time &stamp,
                               const std::vector<std::string> &camera_frames,
                               const std::string &target_frame,
-                              std::vector<tf2::Transform> &transforms);
+                              std::vector<tf2::Transform> &transforms,
+                              bool planar_projection);
 
   static bool toBgrImage(const Image::ConstSharedPtr &msg, BgrImage &output, const rclcpp::Logger &logger);
   static bool extractIntrinsics(const CameraInfo::ConstSharedPtr &info, CameraIntrinsics &intrinsics, const rclcpp::Logger &logger);
@@ -82,6 +89,10 @@ class ImageReprojection : public rclcpp::Node {
                                 const std::vector<tf2::Transform> &transforms,
                                 sensor_msgs::msg::Image &output_image) const;
   static std::array<float, 3> bilinearSample(const BgrImage &image, double u, double v);
+  void updatePlanarWarpCache(size_t index);
+  void updateEquirectWarpCache(size_t index);
+  void preparePlanarScratchBuffers(size_t camera_count) const;
+  void prepareEquirectScratchBuffers(size_t camera_count) const;
 
   std::vector<InputCameraConfig> input_configs_{};
 
@@ -130,6 +141,16 @@ class ImageReprojection : public rclcpp::Node {
   std::vector<tf2::Transform> cached_equirect_transforms_;
   std::vector<bool> planar_tf_ready_;
   std::vector<bool> equirect_tf_ready_;
+
+  mutable std::vector<std::vector<float>> planar_accumulators_;
+  mutable std::vector<std::vector<float>> planar_weights_;
+  mutable std::vector<std::vector<float>> equirect_accumulators_;
+  mutable std::vector<std::vector<float>> equirect_weights_;
+
+  std::vector<std::vector<PixelMapping>> planar_warp_maps_;
+  std::vector<std::vector<PixelMapping>> equirect_warp_maps_;
+  std::vector<bool> planar_warp_ready_;
+  std::vector<bool> equirect_warp_ready_;
 
   sensor_msgs::msg::CameraInfo planar_camera_info_{};
   sensor_msgs::msg::CameraInfo equirect_camera_info_{};
