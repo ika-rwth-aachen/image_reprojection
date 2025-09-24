@@ -61,7 +61,6 @@
 
     params:
       recompute_every_frame: false
-      sync_queue_size: 10 # Synchronisation queue length for ApproximateTime
       transform_timeout: 0.05 # TF lookup timeout in seconds
       frame_timeout: 1.0 # Maximum age (s) to keep partial frame data when waiting for other cameras
       frame_time_tolerance: 0.01 # Maximum time difference (s) between cameras to assemble a joint frame

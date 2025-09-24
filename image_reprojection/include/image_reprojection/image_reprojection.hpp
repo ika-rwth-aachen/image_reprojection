@@ -109,7 +109,6 @@ class ImageReprojection : public rclcpp::Node {
   double equirect_blend_factor_{1.0};
   std::string equirect_frame_id_{};
   double equirect_radius_{1.0};
-  int sync_queue_size_{10};
   double transform_timeout_sec_{0.05};
   double accumulator_timeout_sec_{1.0};
   double frame_time_tolerance_sec_{0.005};

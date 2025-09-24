@@ -96,12 +96,6 @@ ImageReprojection::ImageReprojection(const rclcpp::NodeOptions &options)
 }
 
 void ImageReprojection::loadParameters() {
-  sync_queue_size_ = this->declare_parameter<int>("params.sync_queue_size", 10);
-  if (sync_queue_size_ < 2) {
-    RCLCPP_WARN(get_logger(), "sync_queue_size must be >= 2. Using 2 instead of %d.", sync_queue_size_);
-    sync_queue_size_ = 2;
-  }
-
   accumulator_timeout_sec_ = this->declare_parameter<double>("params.frame_timeout", kDefaultAccumulatorTimeoutSec);
   if (accumulator_timeout_sec_ < 0.0) {
     RCLCPP_WARN(get_logger(), "frame_timeout must be non-negative. Using %.2f instead of %.2f.",
