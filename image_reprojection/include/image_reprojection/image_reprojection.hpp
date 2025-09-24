@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-// message_filters no longer used for per-camera pairs; kept out to simplify deps
+#include <image_transport/subscriber.hpp>
 
 #include <rclcpp/rclcpp.hpp>
 
@@ -136,7 +136,8 @@ class ImageReprojection : public rclcpp::Node {
   sensor_msgs::msg::CameraInfo equirect_camera_info_{};
 
   // Subscriptions
-  std::vector<rclcpp::Subscription<Image>::SharedPtr> image_subs_{};
+  rclcpp::TimerBase::SharedPtr setup_timer_;
+  std::vector<image_transport::Subscriber> image_subs_{};
   std::vector<rclcpp::Subscription<CameraInfo>::SharedPtr> info_subs_{};
   std::map<int64_t, FrameAccumulator> frame_accumulators_{};
 

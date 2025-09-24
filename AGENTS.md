@@ -127,3 +127,6 @@ Manual decoding (no cv_bridge dependency): BGR8, RGB8, BGRA8, RGBA8, MONO8. Stri
 - For dynamic rigs, prefer `recompute_every_frame: true` and consider throttling or GPU offload if performance is tight.
 - Keep precompute + cached TF to minimize per‑frame cost.
 
+## TODO
+
+- distortion model "equirectangular" is unknown; does it even make sense to publish a CameraInfo for equirectangular projection?

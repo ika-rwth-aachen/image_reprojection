@@ -12,20 +12,28 @@
         # - /drivers/zed_camera/rear_center/left/image_rect_color
         # - /drivers/zed_camera/rear_right/left/image_rect_color
       /drivers/zed_camera/front_left/left/image_rect_color:
+        image_transport: compressed
         camera_info_topic: /drivers/zed_camera/front_left/left/camera_info
       /drivers/zed_camera/front_center/left/image_rect_color:
+        image_transport: compressed
         camera_info_topic: /drivers/zed_camera/front_center/left/camera_info
       /drivers/zed_camera/front_right/left/image_rect_color:
+        image_transport: compressed
         camera_info_topic: /drivers/zed_camera/front_right/left/camera_info
       /drivers/zed_camera/mid_left/left/image_rect_color:
+        image_transport: compressed
         camera_info_topic: /drivers/zed_camera/mid_left/left/camera_info
       /drivers/zed_camera/mid_right/left/image_rect_color:
+        image_transport: compressed
         camera_info_topic: /drivers/zed_camera/mid_right/left/camera_info
       /drivers/zed_camera/rear_left/left/image_rect_color:
+        image_transport: compressed
         camera_info_topic: /drivers/zed_camera/rear_left/left/camera_info
       /drivers/zed_camera/rear_center/left/image_rect_color:
+        image_transport: compressed
         camera_info_topic: /drivers/zed_camera/rear_center/left/camera_info
       /drivers/zed_camera/rear_right/left/image_rect_color:
+        image_transport: compressed
         camera_info_topic: /drivers/zed_camera/rear_right/left/camera_info
 
     output:

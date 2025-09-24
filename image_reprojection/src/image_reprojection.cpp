@@ -10,6 +10,7 @@
 #include <vector>
 
 #include <image_reprojection/image_reprojection.hpp>
+#include <image_transport/image_transport.hpp>
 
 #include <rclcpp_components/register_node_macro.hpp>
 
@@ -60,8 +61,6 @@ ImageReprojection::ImageReprojection(const rclcpp::NodeOptions &options)
     equirect_info_publisher_ = this->create_publisher<CameraInfo>(equirect_info_topic_, info_qos);
   }
 
-  setupSubscriptions();
-
   std::vector<std::string> enabled_projections;
   if (enable_planar_) enabled_projections.emplace_back("planar");
   if (enable_equirectangular_) enabled_projections.emplace_back("equirectangular");
@@ -88,6 +87,12 @@ ImageReprojection::ImageReprojection(const rclcpp::NodeOptions &options)
               input_configs_.size(),
               projection_list.c_str(),
               frame_info.empty() ? "n/a" : frame_info.c_str());
+
+  // run setup after constructor has finished to enable shared_from_this()
+  setup_timer_ = this->create_wall_timer(std::chrono::milliseconds(1), [this]() {
+    setupSubscriptions();
+    setup_timer_->cancel();
+  });
 }
 
 void ImageReprojection::loadParameters() {
@@ -241,15 +246,25 @@ void ImageReprojection::setupSubscriptions() {
   planar_tf_ready_.assign(n, false);
   equirect_tf_ready_.assign(n, false);
 
+  image_transport::ImageTransport it(this->shared_from_this());
+
   for (size_t i = 0; i < n; ++i) {
     const auto idx = i;
-    image_subs_[i] = this->create_subscription<Image>(
-        input_configs_[i].image_topic, sensor_qos,
-        [this, idx](const Image::ConstSharedPtr msg) { this->imageCallback(idx, msg); });
+
+    std::string image_transport_param_name = "input." + input_configs_[i].image_topic + ".image_transport";
+    this->declare_parameter<std::string>(image_transport_param_name, "raw"); // TransportHints does not automatically declare the parameter
+    image_transport::TransportHints hints{this, "raw", image_transport_param_name};
+    image_subs_[i] = it.subscribe(
+        input_configs_[i].image_topic,
+        sensor_qos.get_rmw_qos_profile(),
+        [this, idx](const Image::ConstSharedPtr &msg) { this->imageCallback(idx, msg); },
+        std::shared_ptr<void>(),
+        &hints,
+        rclcpp::SubscriptionOptions());
 
     info_subs_[i] = this->create_subscription<CameraInfo>(
         input_configs_[i].camera_info_topic, info_qos,
-        [this, idx](const CameraInfo::ConstSharedPtr msg) { this->cameraInfoCallback(idx, msg); });
+        [this, idx](const CameraInfo::ConstSharedPtr &msg) { this->cameraInfoCallback(idx, msg); });
 
     RCLCPP_INFO(get_logger(),
                 "Subscribed to image '%s' and camera_info '%s'",
