@@ -2,6 +2,8 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <sstream>
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -382,13 +384,15 @@ void ImageReprojection::imageCallback(size_t index, const Image::ConstSharedPtr 
   }
 
   if (selected_it == frame_accumulators_.end()) {
-    auto insert_result = frame_accumulators_.emplace(stamp_ns, FrameAccumulator{});
+    auto insert_result = frame_accumulators_.emplace(stamp_ns, FrameAccumulator());
     selected_it = insert_result.first;
     auto &new_frame = selected_it->second;
     new_frame.stamp = stamp;
     new_frame.images.resize(input_configs_.size());
     new_frame.intrinsics.resize(input_configs_.size());
     new_frame.frame_ids.resize(input_configs_.size());
+    new_frame.arrival_times.resize(input_configs_.size());
+    new_frame.header_stamps.resize(input_configs_.size());
     new_frame.ready.assign(input_configs_.size(), false);
     RCLCPP_DEBUG(get_logger(), "Created new frame bucket %ld for camera %zu", selected_it->first, index);
   }
@@ -399,6 +403,8 @@ void ImageReprojection::imageCallback(size_t index, const Image::ConstSharedPtr 
   frame.images[index] = std::move(converted_image);
   frame.intrinsics[index] = static_intrinsics_[index];
   frame.frame_ids[index] = camera_frame_ids_[index];
+  frame.arrival_times[index] = start_time;
+  frame.header_stamps[index] = stamp;
   frame.ready[index] = true;
 
   const size_t ready_count = static_cast<size_t>(std::count(frame.ready.begin(), frame.ready.end(), true));
@@ -429,10 +435,17 @@ void ImageReprojection::imageCallback(size_t index, const Image::ConstSharedPtr 
     equirect_frame_id_ = fallback_frame;
   }
 
+  const auto processing_start = this->now();
+
   std::vector<tf2::Transform> planar_transforms;
   bool planar_transforms_valid = false;
+  double planar_lookup_ms = 0.0;
+  bool planar_lookup_attempted = false;
   if (enable_planar_) {
+    const auto lookup_t0 = this->now();
+    planar_lookup_attempted = true;
     planar_transforms_valid = lookupCameraTransforms(frame.stamp, frame.frame_ids, planar_frame_id_, planar_transforms, true);
+    planar_lookup_ms = static_cast<double>((this->now() - lookup_t0).nanoseconds()) / 1e6;
     if (!planar_transforms_valid) {
       RCLCPP_WARN(get_logger(), "Frame %ld dropped: missing transforms for planar target '%s'",
                   frame_key,
@@ -442,12 +455,19 @@ void ImageReprojection::imageCallback(size_t index, const Image::ConstSharedPtr 
 
   std::vector<tf2::Transform> equirect_transforms;
   bool equirect_transforms_valid = false;
+  double equirect_lookup_ms = 0.0;
+  bool equirect_lookup_attempted = false;
+  bool equirect_lookup_reused = false;
   if (enable_equirectangular_) {
     if (enable_planar_ && planar_transforms_valid && planar_frame_id_ == equirect_frame_id_) {
       equirect_transforms = planar_transforms;
       equirect_transforms_valid = true;
+      equirect_lookup_reused = true;
     } else {
+      const auto lookup_t0 = this->now();
+      equirect_lookup_attempted = true;
       equirect_transforms_valid = lookupCameraTransforms(frame.stamp, frame.frame_ids, equirect_frame_id_, equirect_transforms, false);
+      equirect_lookup_ms = static_cast<double>((this->now() - lookup_t0).nanoseconds()) / 1e6;
       if (!equirect_transforms_valid) {
         RCLCPP_WARN(get_logger(), "Frame %ld dropped: missing transforms for equirectangular target '%s'",
                     frame_key,
@@ -470,12 +490,17 @@ void ImageReprojection::imageCallback(size_t index, const Image::ConstSharedPtr 
 
   bool planar_success = false;
   bool equirect_success = false;
+  bool planar_attempted = false;
+  bool equirect_attempted = false;
+  double planar_ms = 0.0;
+  double equirect_ms = 0.0;
 
   if (enable_planar_ && planar_transforms_valid) {
     sensor_msgs::msg::Image planar_output;
     const auto planar_t0 = this->now();
+    planar_attempted = true;
     const bool planar_ok = reprojectPlanar(images, frame.intrinsics, planar_transforms, planar_output);
-    const double planar_ms = static_cast<double>((this->now() - planar_t0).nanoseconds()) / 1e6;
+    planar_ms = static_cast<double>((this->now() - planar_t0).nanoseconds()) / 1e6;
     if (planar_ok) {
       planar_output.header.stamp = frame.stamp;
       planar_output.header.frame_id = planar_frame_id_;
@@ -486,7 +511,6 @@ void ImageReprojection::imageCallback(size_t index, const Image::ConstSharedPtr 
       planar_image_publisher_->publish(planar_output);
       planar_info_publisher_->publish(planar_info);
       planar_success = true;
-      RCLCPP_INFO(get_logger(), "Frame %ld planar projection in %.2f ms", frame_key, planar_ms);
     } else {
       RCLCPP_WARN(get_logger(), "Frame %ld planar reprojection failed (%.2f ms)", frame_key, planar_ms);
     }
@@ -495,8 +519,9 @@ void ImageReprojection::imageCallback(size_t index, const Image::ConstSharedPtr 
   if (enable_equirectangular_ && equirect_transforms_valid) {
     sensor_msgs::msg::Image equirect_output;
     const auto eq_t0 = this->now();
+    equirect_attempted = true;
     const bool eq_ok = reprojectEquirectangular(images, frame.intrinsics, equirect_transforms, equirect_output);
-    const double eq_ms = static_cast<double>((this->now() - eq_t0).nanoseconds()) / 1e6;
+    equirect_ms = static_cast<double>((this->now() - eq_t0).nanoseconds()) / 1e6;
     if (eq_ok) {
       equirect_output.header.stamp = frame.stamp;
       equirect_output.header.frame_id = equirect_frame_id_;
@@ -507,14 +532,120 @@ void ImageReprojection::imageCallback(size_t index, const Image::ConstSharedPtr 
       equirect_image_publisher_->publish(equirect_output);
       equirect_info_publisher_->publish(equirect_info);
       equirect_success = true;
-      RCLCPP_INFO(get_logger(), "Frame %ld equirectangular projection in %.2f ms", frame_key, eq_ms);
     } else {
-      RCLCPP_WARN(get_logger(), "Frame %ld equirectangular reprojection failed (%.2f ms)", frame_key, eq_ms);
+      RCLCPP_WARN(get_logger(), "Frame %ld equirectangular reprojection failed (%.2f ms)", frame_key, equirect_ms);
     }
   }
 
-  const double elapsed_ms = static_cast<double>((this->now() - start_time).nanoseconds()) / 1e6;
   if (planar_success || equirect_success) {
+    rclcpp::Time oldest_stamp;
+    rclcpp::Time oldest_arrival;
+    bool stamp_available = false;
+    bool arrival_available = false;
+    for (size_t i = 0; i < frame.ready.size(); ++i) {
+      if (!frame.ready[i]) {
+        continue;
+      }
+      if (i < frame.header_stamps.size()) {
+        const auto &candidate_stamp = frame.header_stamps[i];
+        if (!stamp_available || candidate_stamp < oldest_stamp) {
+          oldest_stamp = candidate_stamp;
+          stamp_available = true;
+        }
+      }
+      if (i < frame.arrival_times.size()) {
+        const auto &candidate_arrival = frame.arrival_times[i];
+        if (!arrival_available || candidate_arrival < oldest_arrival) {
+          oldest_arrival = candidate_arrival;
+          arrival_available = true;
+        }
+      }
+    }
+
+    const auto publish_time = this->now();
+    double stamp_delay_ms = 0.0;
+    double arrival_delay_ms = 0.0;
+    if (stamp_available) {
+      stamp_delay_ms = static_cast<double>((publish_time - oldest_stamp).nanoseconds()) / 1e6;
+    }
+    if (arrival_available) {
+      arrival_delay_ms = static_cast<double>((publish_time - oldest_arrival).nanoseconds()) / 1e6;
+    }
+
+    auto format_ms = [](double value) {
+      char buffer[32];
+      std::snprintf(buffer, sizeof(buffer), "%.2fms", value);
+      return std::string(buffer);
+    };
+
+    rclcpp::Time latest_arrival;
+    bool latest_arrival_available = false;
+    for (size_t i = 0; i < frame.ready.size(); ++i) {
+      if (!frame.ready[i]) {
+        continue;
+      }
+      if (i < frame.arrival_times.size()) {
+        const auto &candidate_arrival = frame.arrival_times[i];
+        if (!latest_arrival_available || candidate_arrival > latest_arrival) {
+          latest_arrival = candidate_arrival;
+          latest_arrival_available = true;
+        }
+      }
+    }
+
+    double sync_wait_ms = 0.0;
+    double arrival_window_ms = 0.0;
+    double ready_to_process_gap_ms = 0.0;
+    if (arrival_available) {
+      sync_wait_ms = static_cast<double>((processing_start - oldest_arrival).nanoseconds()) / 1e6;
+    }
+    if (arrival_available && latest_arrival_available) {
+      arrival_window_ms = static_cast<double>((latest_arrival - oldest_arrival).nanoseconds()) / 1e6;
+      ready_to_process_gap_ms = static_cast<double>((processing_start - latest_arrival).nanoseconds()) / 1e6;
+    }
+    if (sync_wait_ms < 0.0) {
+      sync_wait_ms = 0.0;
+    }
+    if (arrival_window_ms < 0.0) {
+      arrival_window_ms = 0.0;
+    }
+    if (ready_to_process_gap_ms < 0.0) {
+      ready_to_process_gap_ms = 0.0;
+    }
+
+    double processing_latency_ms = static_cast<double>((publish_time - processing_start).nanoseconds()) / 1e6;
+
+    auto summarise_lookup = [&](bool enabled, bool attempted, bool reused, double duration_ms) {
+      if (!enabled) {
+        return std::string{};
+      }
+      if (!attempted) {
+        return reused ? std::string("reused") : std::string("skipped");
+      }
+      return format_ms(duration_ms);
+    };
+
+    auto summarise_projection = [&](bool enabled,
+                                    bool attempted,
+                                    bool succeeded,
+                                    double duration_ms) {
+      if (!enabled) {
+        return std::string{};
+      }
+      if (!attempted) {
+        return std::string("skipped");
+      }
+      std::ostringstream oss;
+      oss << (succeeded ? "ok" : "fail") << " (" << format_ms(duration_ms) << ")";
+      return oss.str();
+    };
+
+    std::string planar_lookup_summary = summarise_lookup(enable_planar_, planar_lookup_attempted, false, planar_lookup_ms);
+    std::string equirect_lookup_summary = summarise_lookup(enable_equirectangular_, equirect_lookup_attempted, equirect_lookup_reused, equirect_lookup_ms);
+
+    std::string planar_projection_summary = summarise_projection(enable_planar_, planar_attempted, planar_success, planar_ms);
+    std::string equirect_projection_summary = summarise_projection(enable_equirectangular_, equirect_attempted, equirect_success, equirect_ms);
+
     std::string success_list;
     if (planar_success) {
       success_list += "planar";
@@ -525,11 +656,39 @@ void ImageReprojection::imageCallback(size_t index, const Image::ConstSharedPtr 
       }
       success_list += "equirect";
     }
-    RCLCPP_INFO(get_logger(),
-                "Frame %ld published in %.2f ms (%s)",
-                frame_key,
-                elapsed_ms,
-                success_list.c_str());
+
+    std::ostringstream line;
+    line << "Frame " << frame_key << " published [" << (success_list.empty() ? "?" : success_list) << "]";
+    line << "\n  oldest stamp to publication:          " << format_ms(stamp_delay_ms)
+         << "\n  oldest arrival to publication:        " << format_ms(arrival_delay_ms)
+         << "\n    oldest arrival to processing start:   " << format_ms(sync_wait_ms);
+    if (arrival_available && latest_arrival_available) {
+      line << "\n      oldest arrival to latest arrival:     " << format_ms(arrival_window_ms)
+           << "\n      latest arrival to processing start:   " << format_ms(ready_to_process_gap_ms);
+    }
+    line << "\n    processing start to publication:      " << format_ms(processing_latency_ms);
+    line << "\n      transform lookups: ";
+    if (enable_planar_) {
+      line << "planar=" << planar_lookup_summary;
+      if (enable_equirectangular_) {
+        line << ", ";
+      }
+    }
+    if (enable_equirectangular_) {
+      line << "equirect=" << equirect_lookup_summary;
+    }
+    line << "\n      projections: ";
+    if (enable_planar_) {
+      line << "planar=" << planar_projection_summary;
+      if (enable_equirectangular_) {
+        line << ", ";
+      }
+    }
+    if (enable_equirectangular_) {
+      line << "equirect=" << equirect_projection_summary;
+    }
+
+    RCLCPP_INFO(get_logger(), "%s", line.str().c_str());
   } else {
     RCLCPP_WARN(get_logger(), "Frame %ld dropped: no projection succeeded", frame_key);
   }

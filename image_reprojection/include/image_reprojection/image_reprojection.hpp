@@ -53,6 +53,8 @@ class ImageReprojection : public rclcpp::Node {
     std::vector<BgrImage> images;
     std::vector<CameraIntrinsics> intrinsics;
     std::vector<std::string> frame_ids;
+    std::vector<rclcpp::Time> arrival_times;
+    std::vector<rclcpp::Time> header_stamps;
   };
 
   struct PixelMapping {
