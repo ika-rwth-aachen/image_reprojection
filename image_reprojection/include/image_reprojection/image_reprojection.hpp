@@ -62,6 +62,11 @@ class ImageReprojection : public rclcpp::Node {
     float v{std::numeric_limits<float>::quiet_NaN()};
   };
 
+  enum class AggregationMode {
+    WaitForAll,
+    LeadWithLatest,
+  };
+
   using Image = sensor_msgs::msg::Image;
   using CameraInfo = sensor_msgs::msg::CameraInfo;
   // No message_filters bundles; subscribe separately to images and camera infos
@@ -73,22 +78,32 @@ class ImageReprojection : public rclcpp::Node {
   void imageCallback(size_t index, const Image::ConstSharedPtr &image);
   void cameraInfoCallback(size_t index, const CameraInfo::ConstSharedPtr &info);
   void cleanupAccumulators(const rclcpp::Time &current_stamp);
+  void processFrame(int64_t frame_key,
+                    FrameAccumulator &frame,
+                    const std::vector<bool> &camera_mask);
+  void processLeadCameraImage(size_t index,
+                              const rclcpp::Time &stamp,
+                              const rclcpp::Time &arrival_time,
+                              BgrImage &&image);
 
   bool lookupCameraTransforms(const rclcpp::Time &stamp,
                               const std::vector<std::string> &camera_frames,
                               const std::string &target_frame,
                               std::vector<tf2::Transform> &transforms,
-                              bool planar_projection);
+                              bool planar_projection,
+                              const std::vector<bool> *camera_mask = nullptr);
 
   static bool toBgrImage(const Image::ConstSharedPtr &msg, BgrImage &output, const rclcpp::Logger &logger);
   static bool extractIntrinsics(const CameraInfo::ConstSharedPtr &info, CameraIntrinsics &intrinsics, const rclcpp::Logger &logger);
   bool reprojectPlanar(const std::vector<BgrImage> &input_images,
                        const std::vector<CameraIntrinsics> &intrinsics,
                        const std::vector<tf2::Transform> &transforms,
+                       const std::vector<bool> *camera_mask,
                        sensor_msgs::msg::Image &output_image) const;
   bool reprojectEquirectangular(const std::vector<BgrImage> &input_images,
                                 const std::vector<CameraIntrinsics> &intrinsics,
                                 const std::vector<tf2::Transform> &transforms,
+                                const std::vector<bool> *camera_mask,
                                 sensor_msgs::msg::Image &output_image) const;
   static std::array<float, 3> bilinearSample(const BgrImage &image, double u, double v);
   void updatePlanarWarpCache(size_t index);
@@ -97,6 +112,8 @@ class ImageReprojection : public rclcpp::Node {
   void prepareEquirectScratchBuffers(size_t camera_count) const;
 
   std::vector<InputCameraConfig> input_configs_{};
+
+  AggregationMode aggregation_mode_{AggregationMode::WaitForAll};
 
   bool enable_planar_{true};
   bool enable_equirectangular_{false};
@@ -126,6 +143,11 @@ class ImageReprojection : public rclcpp::Node {
   double accumulator_timeout_sec_{1.0};
   double frame_time_tolerance_sec_{0.005};
   bool recompute_every_frame_{false};
+
+  std::vector<BgrImage> latest_images_;
+  std::vector<bool> latest_image_ready_;
+  std::vector<rclcpp::Time> latest_image_stamps_;
+  std::vector<rclcpp::Time> latest_image_arrivals_;
 
   // Cached per-projection direction tables (target frame)
   std::vector<double> planar_x_norm_;

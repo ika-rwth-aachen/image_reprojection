@@ -39,7 +39,7 @@
     output:
       projection:
         planar:
-          enabled: true
+          enabled: false
           image_topic: /image_reprojection/planar/image
           camera_info_topic: /image_reprojection/planar/camera_info
           optical_frame_id: front_center_left_camera_optical_frame
@@ -63,4 +63,5 @@
       recompute_every_frame: false
       transform_timeout: 0.05 # TF lookup timeout in seconds
       frame_timeout: 0.1 # Maximum age (s) to keep partial frame data when waiting for other cameras
-      frame_time_tolerance: 0.066 # Maximum time difference (s) between cameras to assemble a joint frame
+      frame_time_tolerance: 0.033 # Maximum time difference (s) between cameras to assemble a joint frame
+      sync_mode: lead_latest # wait_all requires every camera; lead_latest publishes on the lead topic immediately
