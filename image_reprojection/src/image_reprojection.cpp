@@ -3,6 +3,10 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <system_error>
 #include <sstream>
 #include <limits>
 #include <memory>
@@ -34,6 +38,72 @@ constexpr double kDefaultAccumulatorTimeoutSec = 1.0;
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kHalfPi = kPi * 0.5;
 constexpr double kTwoPi = kPi * 2.0;
+
+std::string escapeJson(const std::string &value) {
+  std::ostringstream oss;
+  for (const char ch : value) {
+    switch (ch) {
+      case '"': oss << "\\\""; break;
+      case '\\': oss << "\\\\"; break;
+      case '\b': oss << "\\b"; break;
+      case '\f': oss << "\\f"; break;
+      case '\n': oss << "\\n"; break;
+      case '\r': oss << "\\r"; break;
+      case '\t': oss << "\\t"; break;
+      default:
+        if (static_cast<unsigned char>(ch) < 0x20) {
+          char buffer[7];
+          std::snprintf(buffer, sizeof(buffer), "\\u%04X",
+                        static_cast<unsigned int>(static_cast<unsigned char>(ch)));
+          oss << buffer;
+        } else {
+          oss << ch;
+        }
+    }
+  }
+  return oss.str();
+}
+
+std::array<double, 16> transformToMatrix(const tf2::Transform &transform) {
+  std::array<double, 16> matrix{};
+  const tf2::Matrix3x3 basis = transform.getBasis();
+  const tf2::Vector3 origin = transform.getOrigin();
+
+  matrix[0] = basis[0][0];
+  matrix[1] = basis[0][1];
+  matrix[2] = basis[0][2];
+  matrix[3] = origin.x();
+
+  matrix[4] = basis[1][0];
+  matrix[5] = basis[1][1];
+  matrix[6] = basis[1][2];
+  matrix[7] = origin.y();
+
+  matrix[8] = basis[2][0];
+  matrix[9] = basis[2][1];
+  matrix[10] = basis[2][2];
+  matrix[11] = origin.z();
+
+  matrix[12] = 0.0;
+  matrix[13] = 0.0;
+  matrix[14] = 0.0;
+  matrix[15] = 1.0;
+
+  return matrix;
+}
+
+template <typename Container>
+void writeJsonArray(std::ostringstream &oss, const Container &values) {
+  oss << '[';
+  const size_t count = values.size();
+  for (size_t i = 0; i < count; ++i) {
+    oss << values[i];
+    if (i + 1 < count) {
+      oss << ", ";
+    }
+  }
+  oss << ']';
+}
 
 }  // namespace
 
@@ -118,6 +188,11 @@ void ImageReprojection::loadParameters() {
   if (frame_time_tolerance_sec_ < 0.0) {
     RCLCPP_WARN(get_logger(), "frame_time_tolerance must be non-negative. Using 0.0 instead of %.6f.", frame_time_tolerance_sec_);
     frame_time_tolerance_sec_ = 0.0;
+  }
+
+  gst_config_export_path_ = this->declare_parameter<std::string>("output.gstreamer.config_export_path", "");
+  if (!gst_config_export_path_.empty()) {
+    gst_config_dirty_ = true;
   }
 
   const std::string sync_mode = this->declare_parameter<std::string>("params.sync_mode", "wait_all");
@@ -545,6 +620,178 @@ void ImageReprojection::processLeadCameraImage(size_t index,
   cleanupAccumulators(stamp);
 }
 
+void ImageReprojection::markGstConfigDirty() {
+  if (!gst_config_export_path_.empty()) {
+    gst_config_dirty_ = true;
+  }
+}
+
+void ImageReprojection::exportGstConfigIfReady() {
+  if (gst_config_export_path_.empty() || !gst_config_dirty_) {
+    return;
+  }
+
+  const size_t camera_count = input_configs_.size();
+  if (camera_count == 0) {
+    return;
+  }
+
+  const auto intrinsics_ready = std::all_of(intrinsics_ready_.begin(), intrinsics_ready_.end(), [](bool ready) { return ready; });
+  if (!intrinsics_ready) {
+    return;
+  }
+
+  if (enable_planar_) {
+    if (planar_frame_id_.empty()) {
+      return;
+    }
+    if (planar_tf_ready_.size() < camera_count) {
+      return;
+    }
+    const bool planar_ready = std::all_of(planar_tf_ready_.begin(), planar_tf_ready_.begin() + camera_count, [](bool ready) { return ready; });
+    if (!planar_ready) {
+      return;
+    }
+  }
+
+  if (enable_equirectangular_) {
+    if (equirect_frame_id_.empty()) {
+      return;
+    }
+    if (equirect_tf_ready_.size() < camera_count) {
+      return;
+    }
+    const bool equirect_ready = std::all_of(equirect_tf_ready_.begin(), equirect_tf_ready_.begin() + camera_count, [](bool ready) { return ready; });
+    if (!equirect_ready) {
+      return;
+    }
+  }
+
+  std::ostringstream json;
+  json << std::setprecision(10);
+  json << "{\n";
+  json << "  \"generated_by\": \"image_reprojection\",\n";
+  json << "  \"camera_count\": " << camera_count << ",\n";
+  json << "  \"cameras\": [\n";
+  for (size_t i = 0; i < camera_count; ++i) {
+    const auto &config = input_configs_[i];
+    const auto &intr = static_intrinsics_[i];
+    json << "    {\n";
+    json << "      \"index\": " << i << ",\n";
+    json << "      \"name\": \"" << escapeJson(config.name) << "\",\n";
+    json << "      \"image_topic\": \"" << escapeJson(config.image_topic) << "\",\n";
+    json << "      \"camera_info_topic\": \"" << escapeJson(config.camera_info_topic) << "\",\n";
+    json << "      \"frame_id\": \"" << escapeJson(camera_frame_ids_[i]) << "\",\n";
+    json << "      \"intrinsics\": {\n";
+    json << "        \"fx\": " << intr.fx << ",\n";
+    json << "        \"fy\": " << intr.fy << ",\n";
+    json << "        \"cx\": " << intr.cx << ",\n";
+    json << "        \"cy\": " << intr.cy << ",\n";
+    json << "        \"width\": " << intr.width << ",\n";
+    json << "        \"height\": " << intr.height << "\n";
+    json << "      },\n";
+    json << "      \"planar_transform\": ";
+    if (enable_planar_) {
+      const auto matrix = transformToMatrix(cached_planar_transforms_[i]);
+      writeJsonArray(json, matrix);
+    } else {
+      json << "null";
+    }
+    json << ",\n";
+    json << "      \"equirectangular_transform\": ";
+    if (enable_equirectangular_) {
+      const auto matrix = transformToMatrix(cached_equirect_transforms_[i]);
+      writeJsonArray(json, matrix);
+    } else {
+      json << "null";
+    }
+    json << "\n";
+    json << "    }";
+    if (i + 1 < camera_count) {
+      json << ',';
+    }
+    json << "\n";
+  }
+  json << "  ],\n";
+
+  json << "  \"planar\": {\n";
+  json << "    \"enabled\": " << (enable_planar_ ? "true" : "false");
+  if (enable_planar_) {
+    json << ",\n";
+    json << "    \"frame_id\": \"" << escapeJson(planar_frame_id_) << "\",\n";
+    json << "    \"width\": " << planar_width_ << ",\n";
+    json << "    \"height\": " << planar_height_ << ",\n";
+    json << "    \"fx\": " << planar_fx_ << ",\n";
+    json << "    \"fy\": " << planar_fy_ << ",\n";
+    json << "    \"cx\": " << planar_cx_ << ",\n";
+    json << "    \"cy\": " << planar_cy_ << ",\n";
+    json << "    \"depth\": " << planar_depth_ << ",\n";
+    json << "    \"blend_factor\": " << planar_blend_factor_ << "\n";
+  } else {
+    json << "\n";
+  }
+  json << "  },\n";
+
+  json << "  \"equirectangular\": {\n";
+  json << "    \"enabled\": " << (enable_equirectangular_ ? "true" : "false");
+  if (enable_equirectangular_) {
+    json << ",\n";
+    json << "    \"frame_id\": \"" << escapeJson(equirect_frame_id_) << "\",\n";
+    json << "    \"width\": " << equirect_width_ << ",\n";
+    json << "    \"height\": " << equirect_height_ << ",\n";
+    json << "    \"hfov_rad\": " << equirect_hfov_rad_ << ",\n";
+    json << "    \"vfov_rad\": " << equirect_vfov_rad_ << ",\n";
+    json << "    \"radius\": " << equirect_radius_ << ",\n";
+    json << "    \"blend_factor\": " << equirect_blend_factor_ << "\n";
+  } else {
+    json << "\n";
+  }
+  json << "  }\n";
+  json << "}\n";
+
+  std::error_code ec;
+  std::filesystem::path export_path(gst_config_export_path_);
+  if (export_path.has_parent_path() && !export_path.parent_path().empty()) {
+    std::filesystem::create_directories(export_path.parent_path(), ec);
+    if (ec) {
+      RCLCPP_WARN(get_logger(),
+                  "Failed to create directories for GStreamer config export '%s': %s",
+                  export_path.parent_path().string().c_str(),
+                  ec.message().c_str());
+      return;
+    }
+  }
+
+  std::ofstream output(export_path, std::ios::binary | std::ios::trunc);
+  if (!output) {
+    RCLCPP_WARN(get_logger(),
+                "Failed to open GStreamer config export path '%s' for writing",
+                export_path.string().c_str());
+    return;
+  }
+
+  output << json.str();
+  if (!output.good()) {
+    RCLCPP_WARN(get_logger(),
+                "Failed to write complete GStreamer config to '%s'",
+                export_path.string().c_str());
+    return;
+  }
+
+  output.close();
+  if (!output) {
+    RCLCPP_WARN(get_logger(),
+                "Error finalising GStreamer config export '%s'",
+                export_path.string().c_str());
+    return;
+  }
+
+  gst_config_dirty_ = false;
+  RCLCPP_INFO(get_logger(),
+              "Exported GStreamer configuration to %s",
+              export_path.string().c_str());
+}
+
 void ImageReprojection::processFrame(int64_t frame_key,
                                      FrameAccumulator &frame,
                                      const std::vector<bool> &camera_mask) {
@@ -918,6 +1165,8 @@ bool ImageReprojection::lookupCameraTransforms(const rclcpp::Time &stamp,
     cache_ready.resize(camera_count, false);
   }
 
+  bool cache_updated = false;
+
   if (use_cache) {
     bool fully_cached = true;
     for (size_t i = 0; i < camera_count; ++i) {
@@ -949,12 +1198,16 @@ bool ImageReprojection::lookupCameraTransforms(const rclcpp::Time &stamp,
     if (camera_frames[i] == target_frame) {
       transforms[i].setIdentity();
       if (use_cache) {
+        const bool was_ready = cache_ready[i];
         cached_transforms[i] = transforms[i];
         cache_ready[i] = true;
         if (planar_projection) {
           updatePlanarWarpCache(i);
         } else {
           updateEquirectWarpCache(i);
+        }
+        if (!was_ready) {
+          cache_updated = true;
         }
       }
       continue;
@@ -965,12 +1218,16 @@ bool ImageReprojection::lookupCameraTransforms(const rclcpp::Time &stamp,
           camera_frames[i], target_frame, recompute_every_frame_ ? stamp : rclcpp::Time(0), timeout);
       tf2::fromMsg(tf_msg.transform, transforms[i]);
       if (use_cache) {
+        const bool was_ready = cache_ready[i];
         cached_transforms[i] = transforms[i];
         cache_ready[i] = true;
         if (planar_projection) {
           updatePlanarWarpCache(i);
         } else {
           updateEquirectWarpCache(i);
+        }
+        if (!was_ready) {
+          cache_updated = true;
         }
       }
     } catch (const tf2::TransformException &ex) {
@@ -983,6 +1240,11 @@ bool ImageReprojection::lookupCameraTransforms(const rclcpp::Time &stamp,
     }
   }
 
+  if (cache_updated) {
+    markGstConfigDirty();
+    exportGstConfigIfReady();
+  }
+
   return true;
 }
 
@@ -990,34 +1252,58 @@ void ImageReprojection::cameraInfoCallback(size_t index, const CameraInfo::Const
   if (index >= input_configs_.size()) return;
   CameraIntrinsics intr;
   if (!extractIntrinsics(info, intr, get_logger())) return;
+  const bool intrinsics_were_ready = intrinsics_ready_[index];
+  const std::string previous_frame_id = camera_frame_ids_[index];
+
   static_intrinsics_[index] = intr;
   camera_frame_ids_[index] = info->header.frame_id;
   intrinsics_ready_[index] = true;
 
+  bool require_export = !intrinsics_were_ready || previous_frame_id != camera_frame_ids_[index];
+
   // If target frames are not set, pick this one as default
-  if (enable_planar_ && planar_frame_id_.empty()) planar_frame_id_ = camera_frame_ids_[index];
-  if (enable_equirectangular_ && equirect_frame_id_.empty()) equirect_frame_id_ = camera_frame_ids_[index];
+  if (enable_planar_ && planar_frame_id_.empty()) {
+    planar_frame_id_ = camera_frame_ids_[index];
+    require_export = true;
+  }
+  if (enable_equirectangular_ && equirect_frame_id_.empty()) {
+    equirect_frame_id_ = camera_frame_ids_[index];
+    require_export = true;
+  }
 
   // Cache static transforms if possible (time 0)
   if (enable_planar_ && !planar_frame_id_.empty()) {
     try {
+      const bool was_ready = planar_tf_ready_[index];
       const auto tf_msg = tf_buffer_->lookupTransform(camera_frame_ids_[index], planar_frame_id_, rclcpp::Time(0), tf2::durationFromSec(transform_timeout_sec_));
       tf2::fromMsg(tf_msg.transform, cached_planar_transforms_[index]);
       planar_tf_ready_[index] = true;
       updatePlanarWarpCache(index);
+      if (!was_ready) {
+        require_export = true;
+      }
     } catch (const tf2::TransformException &ex) {
       RCLCPP_DEBUG(get_logger(), "Planar transform not yet available for cam %zu: %s", index, ex.what());
     }
   }
   if (enable_equirectangular_ && !equirect_frame_id_.empty()) {
     try {
+      const bool was_ready = equirect_tf_ready_[index];
       const auto tf_msg = tf_buffer_->lookupTransform(camera_frame_ids_[index], equirect_frame_id_, rclcpp::Time(0), tf2::durationFromSec(transform_timeout_sec_));
       tf2::fromMsg(tf_msg.transform, cached_equirect_transforms_[index]);
       equirect_tf_ready_[index] = true;
       updateEquirectWarpCache(index);
+      if (!was_ready) {
+        require_export = true;
+      }
     } catch (const tf2::TransformException &ex) {
       RCLCPP_DEBUG(get_logger(), "Equirect transform not yet available for cam %zu: %s", index, ex.what());
     }
+  }
+
+  if (require_export) {
+    markGstConfigDirty();
+    exportGstConfigIfReady();
   }
 }
 

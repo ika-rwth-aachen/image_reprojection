@@ -37,6 +37,8 @@
         camera_info_topic: /drivers/zed_camera/rear_right/left/camera_info
 
     output:
+      gstreamer:
+        config_export_path: "/docker-ros/ws/src/target/config.json"
       projection:
         planar:
           enabled: false
@@ -64,4 +66,4 @@
       transform_timeout: 0.05 # TF lookup timeout in seconds
       frame_timeout: 0.1 # Maximum age (s) to keep partial frame data when waiting for other cameras
       frame_time_tolerance: 0.033 # Maximum time difference (s) between cameras to assemble a joint frame
-      sync_mode: lead_latest # wait_all requires every camera; lead_latest publishes on the lead topic immediately
+      sync_mode: wait_all # wait_all requires every camera; lead_latest publishes on the lead topic immediately

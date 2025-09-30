@@ -85,6 +85,8 @@ class ImageReprojection : public rclcpp::Node {
                               const rclcpp::Time &stamp,
                               const rclcpp::Time &arrival_time,
                               BgrImage &&image);
+  void exportGstConfigIfReady();
+  void markGstConfigDirty();
 
   bool lookupCameraTransforms(const rclcpp::Time &stamp,
                               const std::vector<std::string> &camera_frames,
@@ -165,6 +167,9 @@ class ImageReprojection : public rclcpp::Node {
   std::vector<tf2::Transform> cached_equirect_transforms_;
   std::vector<bool> planar_tf_ready_;
   std::vector<bool> equirect_tf_ready_;
+
+  std::string gst_config_export_path_{};
+  bool gst_config_dirty_{false};
 
   mutable std::vector<std::vector<float>> planar_accumulators_;
   mutable std::vector<std::vector<float>> planar_weights_;
