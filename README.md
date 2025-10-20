@@ -1,9 +1,28 @@
 # image_reprojection
 
-Reprojects multiple camera images to the image plane of a virtual output camera
+Reprojects multiple camera images using various projection methods.
 
+> [!WARNING]  
+> 99% of this node has been vibe-coded.
+
+- [Projection Methods](#projection-methods)
 - [Container Images](#container-images)
 - [image_reprojection](#image_reprojection)
+
+
+### Projection Methods
+
+#### Planar Projection
+
+All input images are projected to a planar surface at `output.projection.planar.depth` in the frame `output.projection.planar.frame_id`.
+
+![./assets/planar.png](./assets/planar.png)
+
+#### Equirectangular Projection
+
+All input images are projected to a sphere with radius `output.projection.equirectangular.radius` in the frame `output.projection.equirectangular.frame_id` and then unrolled to a 2D image using [equirectangular projection](https://www.researchgate.net/profile/Kailun-Yang/publication/347957084/figure/fig1/AS:974408793481217@1609328568414/llustration-of-the-equirectangular-projection_W640.jpg).
+
+![./assets/equirectangular.png](./assets/equirectangular.png)
 
 
 ### Container Images
