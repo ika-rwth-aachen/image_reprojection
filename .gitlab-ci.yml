@@ -5,4 +5,5 @@ variables:
   PLATFORM: amd64,arm64
   TARGET: dev,run
   BASE_IMAGE: rwthika/ros2:latest
-  COMMAND: ros2 run image_reprojection image_reprojection
+  COMMAND: ros2 launch image_reprojection image_reprojection_launch.py
+  RMW_IMPLEMENTATION: rmw_zenoh_cpp
