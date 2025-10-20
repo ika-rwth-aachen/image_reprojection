@@ -13,13 +13,16 @@
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
-  <depend>rclcpp</depend>
-  <depend>rclcpp_components</depend>
-  <depend>sensor_msgs</depend>
   <depend>image_transport</depend>
-  <depend>tf2</depend>
-  <depend>tf2_ros</depend>
+  <depend>rclcpp_components</depend>
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
   <depend>tf2_geometry_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2</depend>
+
+  <exec_depend>ffmpeg_image_transport</exec_depend>
+  <exec_depend>image_transport_plugins</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

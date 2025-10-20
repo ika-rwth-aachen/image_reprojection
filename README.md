@@ -11,10 +11,5 @@ ros2 launch image_reprojection image_reprojection_launch.py
 
 ## TODO
 
-- image_transport publisher
 - bug: distortion model "equirectangular" is unknown; does it even make sense to publish a CameraInfo for equirectangular projection?
 - allow to specify arbitrary number of arbitrary projections, e.g., one planar to front, one planar for BEV
-- performance
-  - multi-threaded (caution: are callbacks thread-safe?)
-  - OpenCV? (cv_bridge?)
-  - GPU?

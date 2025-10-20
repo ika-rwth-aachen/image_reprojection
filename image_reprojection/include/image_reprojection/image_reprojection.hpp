@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include <image_transport/publisher.hpp>
 #include <image_transport/subscriber.hpp>
 
 #include <rclcpp/rclcpp.hpp>
@@ -72,7 +73,7 @@ class ImageReprojection : public rclcpp::Node {
   // No message_filters bundles; subscribe separately to images and camera infos
 
   void loadParameters();
-  void setupSubscriptions();
+  void setupTopics();
   void configurePlanarCameraInfo();
   void configureEquirectCameraInfo();
   void imageCallback(size_t index, const Image::ConstSharedPtr &image);
@@ -190,9 +191,9 @@ class ImageReprojection : public rclcpp::Node {
   std::vector<rclcpp::Subscription<CameraInfo>::SharedPtr> info_subs_{};
   std::map<int64_t, FrameAccumulator> frame_accumulators_{};
 
-  rclcpp::Publisher<Image>::SharedPtr planar_image_publisher_{};
+  image_transport::Publisher planar_image_publisher_{};
   rclcpp::Publisher<CameraInfo>::SharedPtr planar_info_publisher_{};
-  rclcpp::Publisher<Image>::SharedPtr equirect_image_publisher_{};
+  image_transport::Publisher equirect_image_publisher_{};
   rclcpp::Publisher<CameraInfo>::SharedPtr equirect_info_publisher_{};
 
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_{};

@@ -120,19 +120,6 @@ ImageReprojection::ImageReprojection(const rclcpp::NodeOptions &options)
   tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
   tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
-  auto info_qos = rclcpp::QoS(10);
-  info_qos.reliability(RMW_QOS_POLICY_RELIABILITY_RELIABLE).transient_local();
-
-  if (enable_planar_) {
-    planar_image_publisher_ = this->create_publisher<Image>(planar_image_topic_, rclcpp::SensorDataQoS());
-    planar_info_publisher_ = this->create_publisher<CameraInfo>(planar_info_topic_, info_qos);
-  }
-
-  if (enable_equirectangular_) {
-    equirect_image_publisher_ = this->create_publisher<Image>(equirect_image_topic_, rclcpp::SensorDataQoS());
-    equirect_info_publisher_ = this->create_publisher<CameraInfo>(equirect_info_topic_, info_qos);
-  }
-
   std::vector<std::string> enabled_projections;
   if (enable_planar_) enabled_projections.emplace_back("planar");
   if (enable_equirectangular_) enabled_projections.emplace_back("equirectangular");
@@ -165,7 +152,7 @@ ImageReprojection::ImageReprojection(const rclcpp::NodeOptions &options)
 
   // run setup after constructor has finished to enable shared_from_this()
   setup_timer_ = this->create_wall_timer(std::chrono::milliseconds(1), [this]() {
-    setupSubscriptions();
+    setupTopics();
     setup_timer_->cancel();
   });
 }
@@ -310,13 +297,25 @@ void ImageReprojection::loadParameters() {
   }
 }
 
-void ImageReprojection::setupSubscriptions() {
+void ImageReprojection::setupTopics() {
   if (input_configs_.empty()) {
     throw std::runtime_error("No input cameras configured");
   }
 
+  image_transport::ImageTransport it(this->shared_from_this());
+
   auto sensor_qos = rclcpp::SensorDataQoS();
   auto info_qos = rclcpp::QoS(10).reliability(RMW_QOS_POLICY_RELIABILITY_RELIABLE);
+
+  if (enable_planar_) {
+    planar_image_publisher_ = it.advertise(planar_image_topic_, 1);
+    planar_info_publisher_ = this->create_publisher<CameraInfo>(planar_info_topic_, info_qos);
+  }
+
+  if (enable_equirectangular_) {
+    equirect_image_publisher_ = it.advertise(equirect_image_topic_, 1);
+    equirect_info_publisher_ = this->create_publisher<CameraInfo>(equirect_info_topic_, info_qos);
+  }
 
   const size_t n = input_configs_.size();
   image_subs_.resize(n);
@@ -340,8 +339,6 @@ void ImageReprojection::setupSubscriptions() {
   latest_image_ready_.assign(n, false);
   latest_image_stamps_.assign(n, rclcpp::Time());
   latest_image_arrivals_.assign(n, rclcpp::Time());
-
-  image_transport::ImageTransport it(this->shared_from_this());
 
   for (size_t i = 0; i < n; ++i) {
     const auto idx = i;
@@ -917,7 +914,7 @@ void ImageReprojection::processFrame(int64_t frame_key,
       planar_info.header.stamp = frame.stamp;
       planar_info.header.frame_id = planar_frame_id_;
 
-      planar_image_publisher_->publish(planar_output);
+      planar_image_publisher_.publish(planar_output);
       planar_info_publisher_->publish(planar_info);
       planar_success = true;
     } else {
@@ -938,7 +935,7 @@ void ImageReprojection::processFrame(int64_t frame_key,
       equirect_info.header.stamp = frame.stamp;
       equirect_info.header.frame_id = equirect_frame_id_;
 
-      equirect_image_publisher_->publish(equirect_output);
+      equirect_image_publisher_.publish(equirect_output);
       equirect_info_publisher_->publish(equirect_info);
       equirect_success = true;
     } else {
