@@ -1456,7 +1456,7 @@ static GType gst_image_reprojection_mode_get_type(void) {
     static const GEnumValue values[] = {
         {GST_IMAGE_REPROJECTION_MODE_AUTO, "Auto", "auto"},
         {GST_IMAGE_REPROJECTION_MODE_PLANAR, "Planar", "planar"},
-        {GST_IMAGE_REPROJECTION_MODE_EQUIRECT, "Equirectangular", "equirect"},
+        {GST_IMAGE_REPROJECTION_MODE_EQUIRECT, "Equirectangular", "equirectangular"},
         {0, NULL, NULL}};
     mode_type = g_enum_register_static("GstImageReprojectionMode", values);
   }
