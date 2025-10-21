@@ -213,7 +213,7 @@ static void gst_image_reprojection_class_init(GstImageReprojectionClass *klass) 
       PROP_PROJECTION_MODE,
       g_param_spec_enum("projection-mode",
                         "Projection Mode",
-                        "Projection to generate (auto/planar/equirect). In auto mode, planar is preferred if enabled",
+                        "Projection to generate (auto/planar/equirectangular). In auto mode, planar is preferred if enabled",
                         GST_TYPE_IMAGE_REPROJECTION_MODE,
                         GST_IMAGE_REPROJECTION_MODE_AUTO,
                         G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY));
@@ -224,10 +224,10 @@ static void gst_image_reprojection_class_init(GstImageReprojectionClass *klass) 
                                      gst_static_pad_template_get(&gst_image_reprojection_src_template));
 
   gst_element_class_set_static_metadata(element_class,
-                                        "Image reprojection aggregator",
+                                        "Image Reprojection",
                                         "Filter/Effect/Video",
-                                        "Stitches multiple cameras into planar or equirectangular projection",
-                                        "Codex Agent <codex@example.com>");
+                                        "Reprojects multiple input video streams using various projection methods",
+                                        "Lennart Reiher <lennart.reiher@ika.rwth-aachen.de>");
 
   aggregator_class->start = gst_image_reprojection_start;
   aggregator_class->stop = gst_image_reprojection_stop;
@@ -1467,9 +1467,9 @@ GST_PLUGIN_DEFINE(
     GST_VERSION_MAJOR,
     GST_VERSION_MINOR,
     imagereprojection,
-    "Image reprojection aggregator",
+    "Image Reprojection",
     gst_image_reprojection_plugin_init,
     "1.0.0",
-    "LGPL",
+    "MIT",
     "gst_image_reprojection",
-    "https://example.com")
+    "https://github.com/ika-rwth-aachen")
