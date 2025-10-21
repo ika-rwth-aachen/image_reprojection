@@ -111,6 +111,7 @@ typedef struct _GstImageReprojection {
   GstImageReprojectionMode active_mode;
   gboolean config_loaded;
   gboolean warned_pad_count;
+  gboolean initial_events_pushed;
 
   GMutex lock;
 
@@ -127,6 +128,9 @@ typedef struct _GstImageReprojection {
   float **planar_weights;
   float **equirect_accumulators;
   float **equirect_weights;
+
+  GstCaps *src_caps;
+  GstSegment segment;
 
   guint next_pad_index;
 } GstImageReprojection;
@@ -181,6 +185,7 @@ static gboolean gst_image_reprojection_update_planar_maps(GstImageReprojection *
 static gboolean gst_image_reprojection_update_equirect_maps(GstImageReprojection *self, GError **error);
 
 static gboolean gst_image_reprojection_ensure_output_caps(GstImageReprojection *self, GError **error);
+static gboolean gst_image_reprojection_push_initial_events(GstImageReprojection *self, GstAggregator *aggregator);
 
 static void gst_image_reprojection_reset_scratch_planar(GstImageReprojection *self);
 static void gst_image_reprojection_reset_scratch_equirect(GstImageReprojection *self);
@@ -246,6 +251,7 @@ static void gst_image_reprojection_init(GstImageReprojection *self) {
   self->active_mode = GST_IMAGE_REPROJECTION_MODE_AUTO;
   self->config_loaded = FALSE;
   self->warned_pad_count = FALSE;
+  self->initial_events_pushed = FALSE;
   g_mutex_init(&self->lock);
 
   self->camera_count = 0;
@@ -261,6 +267,9 @@ static void gst_image_reprojection_init(GstImageReprojection *self) {
   self->planar_weights = NULL;
   self->equirect_accumulators = NULL;
   self->equirect_weights = NULL;
+
+  self->src_caps = NULL;
+  gst_segment_init(&self->segment, GST_FORMAT_TIME);
 
   self->next_pad_index = 0;
 }
@@ -327,6 +336,8 @@ static GstAggregatorPad *gst_image_reprojection_create_new_pad(GstAggregator *ag
 
   pad = g_object_new(GST_TYPE_IMAGE_REPROJECTION_PAD,
                      "name", name ? name : "sink_%u",
+                     "direction", GST_PAD_SINK,
+                     "template", templ,
                      NULL);
   pad->index = self->next_pad_index++;
 
@@ -383,6 +394,7 @@ static gboolean gst_image_reprojection_stop(GstAggregator *aggregator) {
 
   g_mutex_lock(&self->lock);
   self->config_loaded = FALSE;
+  self->initial_events_pushed = FALSE;
   g_mutex_unlock(&self->lock);
 
   if (GST_AGGREGATOR_CLASS(gst_image_reprojection_parent_class)->stop) {
@@ -730,6 +742,10 @@ static GstFlowReturn gst_image_reprojection_aggregate(GstAggregator *aggregator,
 
     GstBuffer *buffer = gst_aggregator_pad_pop_buffer(pad);
     if (!buffer) {
+      if (gst_aggregator_pad_is_eos(pad)) {
+        flow = GST_FLOW_EOS;
+        goto need_more_data;
+      }
       flow = GST_AGGREGATOR_FLOW_NEED_DATA;
       goto need_more_data;
     }
@@ -778,6 +794,13 @@ static GstFlowReturn gst_image_reprojection_aggregate(GstAggregator *aggregator,
   }
 
   if (flow == GST_FLOW_OK && out_buffer) {
+    if (!gst_image_reprojection_push_initial_events(self, aggregator)) {
+      gst_buffer_unref(out_buffer);
+      out_buffer = NULL;
+      flow = GST_FLOW_ERROR;
+      goto need_more_data;
+    }
+
     GstClockTime pts = GST_CLOCK_TIME_NONE;
     GstClockTime dts = GST_CLOCK_TIME_NONE;
     GstClockTime duration = GST_CLOCK_TIME_NONE;
@@ -911,6 +934,10 @@ static void gst_image_reprojection_clear_config(GstImageReprojection *self) {
   gst_image_reprojection_reset_planar(&self->planar);
   gst_image_reprojection_reset_equirect(&self->equirect);
 
+  gst_caps_replace(&self->src_caps, NULL);
+  self->initial_events_pushed = FALSE;
+  gst_segment_init(&self->segment, GST_FORMAT_TIME);
+
   self->config_loaded = FALSE;
 }
 
@@ -1040,6 +1067,13 @@ static gboolean gst_image_reprojection_parse_equirect(JsonObject *root,
 
   const gchar *frame_id = json_object_get_string_member_or(eq_obj, "frame_id", NULL);
   eq->frame_id = frame_id ? g_strdup(frame_id) : NULL;
+
+  GST_INFO("Equirect config: enabled=%d width=%d height=%d hfov=%.3f vfov=%.3f",
+           eq->enabled,
+           eq->width,
+           eq->height,
+           eq->hfov_rad,
+           eq->vfov_rad);
 
   if (eq->width <= 0 || eq->height <= 0 || eq->radius <= 0.0 || eq->hfov_rad <= 0.0 || eq->vfov_rad <= 0.0) {
     g_set_error(error, GST_RESOURCE_ERROR, GST_RESOURCE_ERROR_FAILED,
@@ -1348,8 +1382,47 @@ static gboolean gst_image_reprojection_ensure_output_caps(GstImageReprojection *
     return FALSE;
   }
 
+  gst_caps_replace(&self->src_caps, caps);
+  self->initial_events_pushed = FALSE;
+  gst_caps_unref(caps);
+  return TRUE;
+}
+
+static gboolean gst_image_reprojection_push_initial_events(GstImageReprojection *self, GstAggregator *aggregator) {
+  if (self->initial_events_pushed) {
+    return TRUE;
+  }
+
+  GstPad *srcpad = GST_AGGREGATOR_SRC_PAD(aggregator);
+
+  gchar *stream_id = g_strdup_printf("imagereprojection-%p-%" G_GUINT64_FORMAT,
+                                     (void *)self,
+                                     (guint64)g_get_monotonic_time());
+
+  GstEvent *stream_event = gst_event_new_stream_start(stream_id);
+  g_free(stream_id);
+  if (!gst_pad_push_event(srcpad, stream_event)) {
+    GST_WARNING_OBJECT(self, "Failed to push stream-start event");
+    return FALSE;
+  }
+
+  GstCaps *caps = self->src_caps ? gst_caps_ref(self->src_caps) : NULL;
+  if (!caps) {
+    GST_WARNING_OBJECT(self, "No caps available for src pad");
+    return FALSE;
+  }
+
   gst_aggregator_set_src_caps(GST_AGGREGATOR(self), caps);
   gst_caps_unref(caps);
+
+  gst_segment_init(&self->segment, GST_FORMAT_TIME);
+  GstEvent *segment_event = gst_event_new_segment(&self->segment);
+  if (!gst_pad_push_event(srcpad, segment_event)) {
+    GST_WARNING_OBJECT(self, "Failed to push segment event");
+    return FALSE;
+  }
+
+  self->initial_events_pushed = TRUE;
   return TRUE;
 }
 

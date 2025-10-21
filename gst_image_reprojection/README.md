@@ -47,9 +47,19 @@ The image compiles the plugin and leaves the artifact in `/opt/gstreamer/lib/gst
 2. Launch a GStreamer pipeline that feeds each camera stream into the plugin’s request pads in the same order as listed in the JSON. Example with two test sources and the planar projection:
 
 ```bash
-gst-launch-1.0 \
-  videotestsrc pattern=smpte is-live=true ! video/x-raw,format=BGR,width=640,height=480 ! queue ! imagereprojection name=reproj config-path=/tmp/reprojection.json projection-mode=planar ! videoconvert ! autovideosink \
-  videotestsrc pattern=ball is-live=true ! video/x-raw,format=BGR,width=640,height=480 ! queue ! reproj.sink_1
+for p in planar equirect; do
+  GST_PLUGIN_PATH=/opt/gstreamer/lib/gstreamer-1.0 gst-launch-1.0 -e \
+    imagereprojection name=reproj config-path=/work/reiher/git/its-modules/perception/image_reprojection/config.json projection-mode=$p ! \
+    videoconvert ! x264enc tune=zerolatency speed-preset=ultrafast bitrate=4000 key-int-max=30 ! h264parse ! mp4mux faststart=true ! filesink location=/work/reiher/git/its-modules/perception/image_reprojection/$p.mp4 \
+    videotestsrc pattern=smpte is-live=true num-buffers=150 ! video/x-raw,format=BGR,width=1280,height=720,framerate=30/1 ! queue ! reproj.sink_0 \
+    videotestsrc pattern=ball is-live=true num-buffers=150 ! video/x-raw,format=BGR,width=1280,height=720,framerate=30/1 ! queue ! reproj.sink_1 \
+    videotestsrc pattern=checkers-8 is-live=true num-buffers=150 ! video/x-raw,format=BGR,width=1280,height=720,framerate=30/1 ! queue ! reproj.sink_2 \
+    videotestsrc pattern=zone-plate is-live=true num-buffers=150 ! video/x-raw,format=BGR,width=1280,height=720,framerate=30/1 ! queue ! reproj.sink_3 \
+    videotestsrc pattern=snow is-live=true num-buffers=150 ! video/x-raw,format=BGR,width=1280,height=720,framerate=30/1 ! queue ! reproj.sink_4 \
+    videotestsrc pattern=red is-live=true num-buffers=150 ! video/x-raw,format=BGR,width=1280,height=720,framerate=30/1 ! queue ! reproj.sink_5 \
+    videotestsrc pattern=green is-live=true num-buffers=150 ! video/x-raw,format=BGR,width=1280,height=720,framerate=30/1 ! queue ! reproj.sink_6 \
+    videotestsrc pattern=blue is-live=true num-buffers=150 ! video/x-raw,format=BGR,width=1280,height=720,framerate=30/1 ! queue ! reproj.sink_7
+done
 ```
 
 The first `videotestsrc` is implicitly connected to `reproj.sink_0` because it is upstream of the element; the second source is explicitly linked to `reproj.sink_1`. Add more `sink_N` pads as required.
