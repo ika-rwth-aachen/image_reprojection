@@ -1,0 +1,49 @@
+/*/**:
+  ros__parameters:
+
+    input:
+      image_topics:
+        - /center/image_rect
+        - /left/image_rect
+        - /right/image_rect
+      /left/image_rect:
+        image_transport: compressed
+        camera_info_topic: /left/camera_info
+      /center/image_rect:
+        image_transport: compressed
+        camera_info_topic: /center/camera_info
+      /right/image_rect:
+        image_transport: compressed
+        camera_info_topic: /right/camera_info
+
+    output:
+      projection:
+        planar:
+          enabled: false
+          image_topic: /image_reprojection/planar/image
+          camera_info_topic: /image_reprojection/planar/camera_info
+          optical_frame_id: optical_frame
+          width: 2560
+          height: 720
+          depth: 10.0
+          fov_x: 120.0
+          blend_factor: 0.0
+        equirectangular:
+          enabled: true
+          image_topic: /image_reprojection/equirectangular/image
+          camera_info_topic: /image_reprojection/equirectangular/camera_info
+          optical_frame_id: optical_frame
+          width: 2560
+          height: 640
+          radius: 10.0
+          fov_x: 360.0
+          blend_factor: 0.0
+      gstreamer:
+        config_export_path: config.json
+
+    params:
+      recompute_every_frame: false
+      transform_timeout: 0.05
+      frame_timeout: 0.1
+      frame_time_tolerance: 0.033
+      sync_mode: wait_all
