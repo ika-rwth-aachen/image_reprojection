@@ -1,6 +1,6 @@
 # image_reprojection
 
-ROS node and corresponding GStreamer pluging for reprojecting multiple camera images using various projection methods.
+ROS node and corresponding GStreamer pluging for reprojecting multiple camera images using various projection methods
 
 > [!WARNING]  
 > 99% of this project has been vibe-coded.
