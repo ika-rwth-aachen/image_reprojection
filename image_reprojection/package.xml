@@ -21,7 +21,6 @@
   <depend>tf2_ros</depend>
   <depend>tf2</depend>
 
-  <exec_depend>ffmpeg_image_transport</exec_depend>
   <exec_depend>image_transport_plugins</exec_depend>
 
   <export>
