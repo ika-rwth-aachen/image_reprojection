@@ -77,7 +77,6 @@ colcon test
 colcon test-result --verbose
 ```
 
-
 ## 📝 Documentation
 
 Package and node interfaces are documented in the respective package READMEs listed below.
@@ -86,6 +85,36 @@ Package and node interfaces are documented in the respective package READMEs lis
 | --- | --- |
 | [image_reprojection](image_reprojection/README.md) | ROS 2 package to reproject multiple camera images using various projection methods |
 | [gst_image_reprojection](gst_image_reprojection/README.md) | GStreamer plugin to reproject multiple camera images using various projection methods |
+
+## 📚 Citation
+
+This repository has been published in the context of the following journal article. We hope that our tools can help your research. If this is the case, please cite it using the metadata specified in [CITATION.cff](CITATION.cff), or click on *Cite this repository* in GitHub's *About* section on the top right.
+
+> **Digital Triplet for Developing Future Reliable 6G Cooperative Intelligent Transport Systems: Case Studies from Teleoperation to Platooning**
+>
+> Hendrik Schippers, Niklas A. Wagner, Lennart Reiher, Harun Teper, Lukas Ostendorf, Jian-Jia Chen, Lutz Eckstein, Christian Wietfeld
+>
+> <sup><sub>
+> *Abstract* –
+> Future Cooperative Intelligent Transport Systems (C-ITSs) will impose stringent requirements
+> on future 6G mobile networks in terms of latency, data rate, and reliability. These requirements must be met
+> in rapidly changing wireless channel conditions. Hence, their fulfillment requires rigorous and reproducible
+> testing environments that enable a seamless transition from simulation to real-world deployment. However,
+> existing testbeds and simulation environments either lack physical realism or fail to scale cost-effectively,
+> hindering comprehensive C-ITS evaluation. To overcome these limitations, we implement the concept of a
+> Digital Triplet, comprising three complementary layers: a full-scale real-world test field, a co-simulation
+> environment for integrating additional simulated entities, and a scaled-down replica of the test field. This
+> architecture enables reliable, reproducible, and scalable testing of future 6G-enabled C-ITS applications
+> across different levels of abstraction. We demonstrate the applicability of the Digital Triplet through multiple
+> case studies. For remote driving, we deploy and optimize a low-latency video streaming system and simulate
+> a mmWave communication channel incorporating Reconfigurable Intelligent Surfaces (RISs). An up to 74%
+> reduced median Glass-to-Glass (G2G) latency is achieved in a mobile network compared to related work
+> using a local network. Moreover, emulating real-world vehicle localization in the scaled test field enables the
+> implementation of cross-domain Nonlinear Model Predictive Control (NMPC)-based vehicular platooning.
+> Finally, we evaluate the NMPC platooning controller in both decentralized (on-vehicle) and centralized
+> (edge cloud) configurations. The results highlight the strong potential of the Digital Triplet to accelerate
+> the development and validation of C-ITS applications within future 6G networks.
+> </sup></sup>
 
 ## ⚖️ Licensing
 
