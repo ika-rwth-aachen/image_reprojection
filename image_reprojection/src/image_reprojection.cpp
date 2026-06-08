@@ -6,12 +6,12 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
-#include <system_error>
-#include <sstream>
 #include <limits>
 #include <memory>
+#include <sstream>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -39,22 +39,35 @@ constexpr double kPi = 3.14159265358979323846;
 constexpr double kHalfPi = kPi * 0.5;
 constexpr double kTwoPi = kPi * 2.0;
 
-std::string escapeJson(const std::string &value) {
+std::string escapeJson(const std::string& value) {
   std::ostringstream oss;
   for (const char ch : value) {
     switch (ch) {
-      case '"': oss << "\\\""; break;
-      case '\\': oss << "\\\\"; break;
-      case '\b': oss << "\\b"; break;
-      case '\f': oss << "\\f"; break;
-      case '\n': oss << "\\n"; break;
-      case '\r': oss << "\\r"; break;
-      case '\t': oss << "\\t"; break;
+      case '"':
+        oss << "\\\"";
+        break;
+      case '\\':
+        oss << "\\\\";
+        break;
+      case '\b':
+        oss << "\\b";
+        break;
+      case '\f':
+        oss << "\\f";
+        break;
+      case '\n':
+        oss << "\\n";
+        break;
+      case '\r':
+        oss << "\\r";
+        break;
+      case '\t':
+        oss << "\\t";
+        break;
       default:
         if (static_cast<unsigned char>(ch) < 0x20) {
           char buffer[7];
-          std::snprintf(buffer, sizeof(buffer), "\\u%04X",
-                        static_cast<unsigned int>(static_cast<unsigned char>(ch)));
+          std::snprintf(buffer, sizeof(buffer), "\\u%04X", static_cast<unsigned int>(static_cast<unsigned char>(ch)));
           oss << buffer;
         } else {
           oss << ch;
@@ -64,7 +77,7 @@ std::string escapeJson(const std::string &value) {
   return oss.str();
 }
 
-std::array<double, 16> transformToMatrix(const tf2::Transform &transform) {
+std::array<double, 16> transformToMatrix(const tf2::Transform& transform) {
   std::array<double, 16> matrix{};
   const tf2::Matrix3x3 basis = transform.getBasis();
   const tf2::Vector3 origin = transform.getOrigin();
@@ -93,7 +106,7 @@ std::array<double, 16> transformToMatrix(const tf2::Transform &transform) {
 }
 
 template <typename Container>
-void writeJsonArray(std::ostringstream &oss, const Container &values) {
+void writeJsonArray(std::ostringstream& oss, const Container& values) {
   oss << '[';
   const size_t count = values.size();
   for (size_t i = 0; i < count; ++i) {
@@ -107,8 +120,7 @@ void writeJsonArray(std::ostringstream &oss, const Container &values) {
 
 }  // namespace
 
-ImageReprojection::ImageReprojection(const rclcpp::NodeOptions &options)
-    : rclcpp::Node("image_reprojection", options) {
+ImageReprojection::ImageReprojection(const rclcpp::NodeOptions& options) : rclcpp::Node("image_reprojection", options) {
   loadParameters();
   if (enable_planar_) {
     configurePlanarCameraInfo();
@@ -141,14 +153,10 @@ ImageReprojection::ImageReprojection(const rclcpp::NodeOptions &options)
     frame_info += "equirect:" + (equirect_frame_id_.empty() ? std::string("<dynamic>") : equirect_frame_id_);
   }
 
-  const char *sync_mode_str = aggregation_mode_ == AggregationMode::WaitForAll ? "wait_all" : "lead_latest";
+  const char* sync_mode_str = aggregation_mode_ == AggregationMode::WaitForAll ? "wait_all" : "lead_latest";
 
-  RCLCPP_INFO(get_logger(),
-              "Image reprojection node initialised with %zu inputs. Projections: %s (%s). Sync mode: %s",
-              input_configs_.size(),
-              projection_list.c_str(),
-              frame_info.empty() ? "n/a" : frame_info.c_str(),
-              sync_mode_str);
+  RCLCPP_INFO(get_logger(), "Image reprojection node initialised with %zu inputs. Projections: %s (%s). Sync mode: %s",
+              input_configs_.size(), projection_list.c_str(), frame_info.empty() ? "n/a" : frame_info.c_str(), sync_mode_str);
 
   // run setup after constructor has finished to enable shared_from_this()
   setup_timer_ = this->create_wall_timer(std::chrono::milliseconds(1), [this]() {
@@ -160,8 +168,7 @@ ImageReprojection::ImageReprojection(const rclcpp::NodeOptions &options)
 void ImageReprojection::loadParameters() {
   accumulator_timeout_sec_ = this->declare_parameter<double>("params.frame_timeout", kDefaultAccumulatorTimeoutSec);
   if (accumulator_timeout_sec_ < 0.0) {
-    RCLCPP_WARN(get_logger(), "frame_timeout must be non-negative. Using %.2f instead of %.2f.",
-                kDefaultAccumulatorTimeoutSec,
+    RCLCPP_WARN(get_logger(), "frame_timeout must be non-negative. Using %.2f instead of %.2f.", kDefaultAccumulatorTimeoutSec,
                 accumulator_timeout_sec_);
     accumulator_timeout_sec_ = kDefaultAccumulatorTimeoutSec;
   }
@@ -200,7 +207,8 @@ void ImageReprojection::loadParameters() {
 
   if (enable_planar_) {
     planar_image_topic_ = this->declare_parameter<std::string>("output.projection.planar.image_topic", "~/output/planar/image");
-    planar_info_topic_ = this->declare_parameter<std::string>("output.projection.planar.camera_info_topic", "~/output/planar/camera_info");
+    planar_info_topic_ =
+        this->declare_parameter<std::string>("output.projection.planar.camera_info_topic", "~/output/planar/camera_info");
     planar_frame_id_ = this->declare_parameter<std::string>("output.projection.planar.optical_frame_id", "");
     planar_width_ = this->declare_parameter<int>("output.projection.planar.width", 1280);
     planar_height_ = this->declare_parameter<int>("output.projection.planar.height", 720);
@@ -228,12 +236,15 @@ void ImageReprojection::loadParameters() {
   }
 
   if (enable_equirectangular_) {
-    equirect_image_topic_ = this->declare_parameter<std::string>("output.projection.equirectangular.image_topic", "~/output/equirectangular/image");
-    equirect_info_topic_ = this->declare_parameter<std::string>("output.projection.equirectangular.camera_info_topic", "~/output/equirectangular/camera_info");
+    equirect_image_topic_ =
+        this->declare_parameter<std::string>("output.projection.equirectangular.image_topic", "~/output/equirectangular/image");
+    equirect_info_topic_ = this->declare_parameter<std::string>("output.projection.equirectangular.camera_info_topic",
+                                                                "~/output/equirectangular/camera_info");
     equirect_frame_id_ = this->declare_parameter<std::string>("output.projection.equirectangular.optical_frame_id", "");
     equirect_width_ = this->declare_parameter<int>("output.projection.equirectangular.width", 2048);
     equirect_height_ = this->declare_parameter<int>("output.projection.equirectangular.height", 1024);
-    equirect_radius_ = this->declare_parameter<double>("output.projection.equirectangular.radius", enable_planar_ ? planar_depth_ : 1.0);
+    equirect_radius_ =
+        this->declare_parameter<double>("output.projection.equirectangular.radius", enable_planar_ ? planar_depth_ : 1.0);
     equirect_blend_factor_ = this->declare_parameter<double>("output.projection.equirectangular.blend_factor", 1.0);
     const double equirect_fov_x_deg = this->declare_parameter<double>("output.projection.equirectangular.fov_x", 360.0);
 
@@ -268,7 +279,7 @@ void ImageReprojection::loadParameters() {
   input_configs_.reserve(image_topics.size());
 
   for (size_t i = 0; i < image_topics.size(); ++i) {
-    const auto &topic = image_topics[i];
+    const auto& topic = image_topics[i];
     InputCameraConfig config;
     config.name = "input_" + std::to_string(i);
     config.image_topic = topic;
@@ -344,23 +355,19 @@ void ImageReprojection::setupTopics() {
     const auto idx = i;
 
     std::string image_transport_param_name = "input." + input_configs_[i].image_topic + ".image_transport";
-    this->declare_parameter<std::string>(image_transport_param_name, "raw"); // TransportHints does not automatically declare the parameter
+    this->declare_parameter<std::string>(image_transport_param_name,
+                                         "raw");  // TransportHints does not automatically declare the parameter
     image_transport::TransportHints hints{this, "raw", image_transport_param_name};
     image_subs_[i] = it.subscribe(
-        input_configs_[i].image_topic,
-        sensor_qos.get_rmw_qos_profile(),
-        [this, idx](const Image::ConstSharedPtr &msg) { this->imageCallback(idx, msg); },
-        std::shared_ptr<void>(),
-        &hints,
+        input_configs_[i].image_topic, sensor_qos.get_rmw_qos_profile(),
+        [this, idx](const Image::ConstSharedPtr& msg) { this->imageCallback(idx, msg); }, std::shared_ptr<void>(), &hints,
         rclcpp::SubscriptionOptions());
 
     info_subs_[i] = this->create_subscription<CameraInfo>(
         input_configs_[i].camera_info_topic, info_qos,
-        [this, idx](const CameraInfo::ConstSharedPtr &msg) { this->cameraInfoCallback(idx, msg); });
+        [this, idx](const CameraInfo::ConstSharedPtr& msg) { this->cameraInfoCallback(idx, msg); });
 
-    RCLCPP_INFO(get_logger(),
-                "Subscribed to image '%s' and camera_info '%s'",
-                input_configs_[i].image_topic.c_str(),
+    RCLCPP_INFO(get_logger(), "Subscribed to image '%s' and camera_info '%s'", input_configs_[i].image_topic.c_str(),
                 input_configs_[i].camera_info_topic.c_str());
   }
 }
@@ -372,9 +379,7 @@ void ImageReprojection::configurePlanarCameraInfo() {
   planar_camera_info_.d = {0.0, 0.0, 0.0, 0.0, 0.0};
   planar_camera_info_.k = {planar_fx_, 0.0, planar_cx_, 0.0, planar_fy_, planar_cy_, 0.0, 0.0, 1.0};
   planar_camera_info_.r = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
-  planar_camera_info_.p = {planar_fx_, 0.0, planar_cx_, 0.0,
-                           0.0, planar_fy_, planar_cy_, 0.0,
-                           0.0, 0.0, 1.0, 0.0};
+  planar_camera_info_.p = {planar_fx_, 0.0, planar_cx_, 0.0, 0.0, planar_fy_, planar_cy_, 0.0, 0.0, 0.0, 1.0, 0.0};
   planar_camera_info_.binning_x = 1;
   planar_camera_info_.binning_y = 1;
   planar_camera_info_.roi.x_offset = 0;
@@ -397,13 +402,9 @@ void ImageReprojection::configureEquirectCameraInfo() {
   equirect_camera_info_.width = static_cast<uint32_t>(equirect_width_);
   equirect_camera_info_.distortion_model = "equirectangular";
   equirect_camera_info_.d.clear();
-  equirect_camera_info_.k = {equirect_hfov_rad_, 0.0, 0.0,
-                             0.0, equirect_vfov_rad_, 0.0,
-                             0.0, 0.0, 1.0};
+  equirect_camera_info_.k = {equirect_hfov_rad_, 0.0, 0.0, 0.0, equirect_vfov_rad_, 0.0, 0.0, 0.0, 1.0};
   equirect_camera_info_.r = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
-  equirect_camera_info_.p = {equirect_hfov_rad_, 0.0, 0.0, 0.0,
-                             0.0, equirect_vfov_rad_, 0.0, 0.0,
-                             0.0, 0.0, 1.0, 0.0};
+  equirect_camera_info_.p = {equirect_hfov_rad_, 0.0, 0.0, 0.0, 0.0, equirect_vfov_rad_, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0};
   equirect_camera_info_.binning_x = 1;
   equirect_camera_info_.binning_y = 1;
   equirect_camera_info_.roi.x_offset = 0;
@@ -431,7 +432,7 @@ void ImageReprojection::configureEquirectCameraInfo() {
   }
 }
 
-void ImageReprojection::imageCallback(size_t index, const Image::ConstSharedPtr &image) {
+void ImageReprojection::imageCallback(size_t index, const Image::ConstSharedPtr& image) {
   const auto arrival_time = this->now();
 
   if (index >= input_configs_.size()) {
@@ -445,8 +446,7 @@ void ImageReprojection::imageCallback(size_t index, const Image::ConstSharedPtr 
   }
 
   if (!intrinsics_ready_[index]) {
-    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
-                         "Ignoring image for cam %zu until CameraInfo is received", index);
+    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "Ignoring image for cam %zu until CameraInfo is received", index);
     return;
   }
 
@@ -460,7 +460,7 @@ void ImageReprojection::imageCallback(size_t index, const Image::ConstSharedPtr 
   const int64_t stamp_ns = stamp.nanoseconds();
   const rclcpp::Duration tolerance = rclcpp::Duration::from_seconds(frame_time_tolerance_sec_);
 
-  auto within_tolerance = [&](const FrameAccumulator &candidate) {
+  auto within_tolerance = [&](const FrameAccumulator& candidate) {
     const rclcpp::Duration diff = (stamp >= candidate.stamp) ? (stamp - candidate.stamp) : (candidate.stamp - stamp);
     return diff <= tolerance;
   };
@@ -481,7 +481,7 @@ void ImageReprojection::imageCallback(size_t index, const Image::ConstSharedPtr 
   if (selected_it == frame_accumulators_.end()) {
     auto insert_result = frame_accumulators_.emplace(stamp_ns, FrameAccumulator());
     selected_it = insert_result.first;
-    auto &new_frame = selected_it->second;
+    auto& new_frame = selected_it->second;
     new_frame.stamp = stamp;
     new_frame.images.resize(input_configs_.size());
     new_frame.intrinsics.resize(input_configs_.size());
@@ -492,7 +492,7 @@ void ImageReprojection::imageCallback(size_t index, const Image::ConstSharedPtr 
     RCLCPP_DEBUG(get_logger(), "Created new frame bucket %ld for camera %zu", selected_it->first, index);
   }
 
-  auto &frame = selected_it->second;
+  auto& frame = selected_it->second;
   const int64_t frame_key = selected_it->first;
 
   frame.images[index] = std::move(converted_image);
@@ -505,21 +505,13 @@ void ImageReprojection::imageCallback(size_t index, const Image::ConstSharedPtr 
   const size_t ready_count = static_cast<size_t>(std::count(frame.ready.begin(), frame.ready.end(), true));
   const bool frame_ready = ready_count == frame.ready.size();
   if (!frame_ready) {
-    RCLCPP_DEBUG(get_logger(),
-                 "Frame %ld: %zu/%zu cameras ready (latest camera %zu, stamp %.3f s)",
-                 frame_key,
-                 ready_count,
-                 frame.ready.size(),
-                 index,
-                 stamp.seconds());
+    RCLCPP_DEBUG(get_logger(), "Frame %ld: %zu/%zu cameras ready (latest camera %zu, stamp %.3f s)", frame_key, ready_count,
+                 frame.ready.size(), index, stamp.seconds());
     cleanupAccumulators(stamp);
     return;
   }
 
-  RCLCPP_DEBUG(get_logger(),
-               "Frame %ld: all %zu cameras ready (processing)",
-               frame_key,
-               frame.images.size());
+  RCLCPP_DEBUG(get_logger(), "Frame %ld: all %zu cameras ready (processing)", frame_key, frame.images.size());
 
   processFrame(frame_key, frame, frame.ready);
   frame_accumulators_.erase(frame_key);
@@ -527,9 +519,9 @@ void ImageReprojection::imageCallback(size_t index, const Image::ConstSharedPtr 
 }
 
 void ImageReprojection::processLeadCameraImage(size_t index,
-                                               const rclcpp::Time &stamp,
-                                               const rclcpp::Time &arrival_time,
-                                               BgrImage &&image) {
+                                               const rclcpp::Time& stamp,
+                                               const rclcpp::Time& arrival_time,
+                                               BgrImage&& image) {
   const size_t camera_count = input_configs_.size();
   if (camera_count == 0) {
     return;
@@ -573,7 +565,7 @@ void ImageReprojection::processLeadCameraImage(size_t index,
     }
 
     if (i != index) {
-      const auto &other_stamp = latest_image_stamps_[i];
+      const auto& other_stamp = latest_image_stamps_[i];
       const rclcpp::Duration diff = (other_stamp >= stamp) ? (other_stamp - stamp) : (stamp - other_stamp);
       if (diff > tolerance) {
         continue;
@@ -598,9 +590,7 @@ void ImageReprojection::processLeadCameraImage(size_t index,
   }
 
   if (active_count == 0) {
-    RCLCPP_DEBUG(get_logger(),
-                 "Lead camera frame %ld dropped: no usable inputs within tolerance",
-                 stamp.nanoseconds());
+    RCLCPP_DEBUG(get_logger(), "Lead camera frame %ld dropped: no usable inputs within tolerance", stamp.nanoseconds());
     cleanupAccumulators(stamp);
     return;
   }
@@ -645,7 +635,8 @@ void ImageReprojection::exportGstConfigIfReady() {
     if (planar_tf_ready_.size() < camera_count) {
       return;
     }
-    const bool planar_ready = std::all_of(planar_tf_ready_.begin(), planar_tf_ready_.begin() + camera_count, [](bool ready) { return ready; });
+    const bool planar_ready =
+        std::all_of(planar_tf_ready_.begin(), planar_tf_ready_.begin() + camera_count, [](bool ready) { return ready; });
     if (!planar_ready) {
       return;
     }
@@ -658,7 +649,8 @@ void ImageReprojection::exportGstConfigIfReady() {
     if (equirect_tf_ready_.size() < camera_count) {
       return;
     }
-    const bool equirect_ready = std::all_of(equirect_tf_ready_.begin(), equirect_tf_ready_.begin() + camera_count, [](bool ready) { return ready; });
+    const bool equirect_ready =
+        std::all_of(equirect_tf_ready_.begin(), equirect_tf_ready_.begin() + camera_count, [](bool ready) { return ready; });
     if (!equirect_ready) {
       return;
     }
@@ -671,8 +663,8 @@ void ImageReprojection::exportGstConfigIfReady() {
   json << "  \"camera_count\": " << camera_count << ",\n";
   json << "  \"cameras\": [\n";
   for (size_t i = 0; i < camera_count; ++i) {
-    const auto &config = input_configs_[i];
-    const auto &intr = static_intrinsics_[i];
+    const auto& config = input_configs_[i];
+    const auto& intr = static_intrinsics_[i];
     json << "    {\n";
     json << "      \"index\": " << i << ",\n";
     json << "      \"name\": \"" << escapeJson(config.name) << "\",\n";
@@ -751,47 +743,35 @@ void ImageReprojection::exportGstConfigIfReady() {
   if (export_path.has_parent_path() && !export_path.parent_path().empty()) {
     std::filesystem::create_directories(export_path.parent_path(), ec);
     if (ec) {
-      RCLCPP_WARN(get_logger(),
-                  "Failed to create directories for GStreamer config export '%s': %s",
-                  export_path.parent_path().string().c_str(),
-                  ec.message().c_str());
+      RCLCPP_WARN(get_logger(), "Failed to create directories for GStreamer config export '%s': %s",
+                  export_path.parent_path().string().c_str(), ec.message().c_str());
       return;
     }
   }
 
   std::ofstream output(export_path, std::ios::binary | std::ios::trunc);
   if (!output) {
-    RCLCPP_WARN(get_logger(),
-                "Failed to open GStreamer config export path '%s' for writing",
-                export_path.string().c_str());
+    RCLCPP_WARN(get_logger(), "Failed to open GStreamer config export path '%s' for writing", export_path.string().c_str());
     return;
   }
 
   output << json.str();
   if (!output.good()) {
-    RCLCPP_WARN(get_logger(),
-                "Failed to write complete GStreamer config to '%s'",
-                export_path.string().c_str());
+    RCLCPP_WARN(get_logger(), "Failed to write complete GStreamer config to '%s'", export_path.string().c_str());
     return;
   }
 
   output.close();
   if (!output) {
-    RCLCPP_WARN(get_logger(),
-                "Error finalising GStreamer config export '%s'",
-                export_path.string().c_str());
+    RCLCPP_WARN(get_logger(), "Error finalising GStreamer config export '%s'", export_path.string().c_str());
     return;
   }
 
   gst_config_dirty_ = false;
-  RCLCPP_INFO(get_logger(),
-              "Exported GStreamer configuration to %s",
-              export_path.string().c_str());
+  RCLCPP_INFO(get_logger(), "Exported GStreamer configuration to %s", export_path.string().c_str());
 }
 
-void ImageReprojection::processFrame(int64_t frame_key,
-                                     FrameAccumulator &frame,
-                                     const std::vector<bool> &camera_mask) {
+void ImageReprojection::processFrame(int64_t frame_key, FrameAccumulator& frame, const std::vector<bool>& camera_mask) {
   const size_t camera_count = frame.images.size();
   auto is_active = [&](size_t idx) {
     if (camera_mask.empty()) {
@@ -837,7 +817,7 @@ void ImageReprojection::processFrame(int64_t frame_key,
   }
 
   const auto processing_start = this->now();
-  const std::vector<bool> *mask_ptr = camera_mask.empty() ? nullptr : &camera_mask;
+  const std::vector<bool>* mask_ptr = camera_mask.empty() ? nullptr : &camera_mask;
 
   std::vector<tf2::Transform> planar_transforms;
   bool planar_transforms_valid = false;
@@ -846,11 +826,11 @@ void ImageReprojection::processFrame(int64_t frame_key,
   if (enable_planar_) {
     const auto lookup_t0 = this->now();
     planar_lookup_attempted = true;
-    planar_transforms_valid = lookupCameraTransforms(frame.stamp, frame.frame_ids, planar_frame_id_, planar_transforms, true, mask_ptr);
+    planar_transforms_valid =
+        lookupCameraTransforms(frame.stamp, frame.frame_ids, planar_frame_id_, planar_transforms, true, mask_ptr);
     planar_lookup_ms = static_cast<double>((this->now() - lookup_t0).nanoseconds()) / 1e6;
     if (!planar_transforms_valid) {
-      RCLCPP_WARN(get_logger(), "Frame %ld dropped: missing transforms for planar target '%s'",
-                  frame_key,
+      RCLCPP_WARN(get_logger(), "Frame %ld dropped: missing transforms for planar target '%s'", frame_key,
                   planar_frame_id_.c_str());
     }
   }
@@ -868,11 +848,11 @@ void ImageReprojection::processFrame(int64_t frame_key,
     } else {
       const auto lookup_t0 = this->now();
       equirect_lookup_attempted = true;
-      equirect_transforms_valid = lookupCameraTransforms(frame.stamp, frame.frame_ids, equirect_frame_id_, equirect_transforms, false, mask_ptr);
+      equirect_transforms_valid =
+          lookupCameraTransforms(frame.stamp, frame.frame_ids, equirect_frame_id_, equirect_transforms, false, mask_ptr);
       equirect_lookup_ms = static_cast<double>((this->now() - lookup_t0).nanoseconds()) / 1e6;
       if (!equirect_transforms_valid) {
-        RCLCPP_WARN(get_logger(), "Frame %ld dropped: missing transforms for equirectangular target '%s'",
-                    frame_key,
+        RCLCPP_WARN(get_logger(), "Frame %ld dropped: missing transforms for equirectangular target '%s'", frame_key,
                     equirect_frame_id_.c_str());
       }
     }
@@ -884,7 +864,7 @@ void ImageReprojection::processFrame(int64_t frame_key,
 
   std::vector<BgrImage> images;
   images.reserve(frame.images.size());
-  for (auto &stored_image : frame.images) {
+  for (auto& stored_image : frame.images) {
     images.emplace_back(std::move(stored_image));
   }
 
@@ -957,7 +937,7 @@ void ImageReprojection::processFrame(int64_t frame_key,
     if (!is_active(i)) {
       continue;
     }
-    const auto &candidate_stamp = frame.header_stamps[i];
+    const auto& candidate_stamp = frame.header_stamps[i];
     if (candidate_stamp.nanoseconds() == 0) {
       continue;
     }
@@ -965,7 +945,7 @@ void ImageReprojection::processFrame(int64_t frame_key,
       oldest_stamp = candidate_stamp;
       stamp_available = true;
     }
-    const auto &candidate_arrival = frame.arrival_times[i];
+    const auto& candidate_arrival = frame.arrival_times[i];
     if (candidate_arrival.nanoseconds() == 0) {
       continue;
     }
@@ -997,7 +977,7 @@ void ImageReprojection::processFrame(int64_t frame_key,
     if (!is_active(i)) {
       continue;
     }
-    const auto &candidate_arrival = frame.arrival_times[i];
+    const auto& candidate_arrival = frame.arrival_times[i];
     if (candidate_arrival.nanoseconds() == 0) {
       continue;
     }
@@ -1039,10 +1019,7 @@ void ImageReprojection::processFrame(int64_t frame_key,
     return format_ms(duration_ms);
   };
 
-  auto summarise_projection = [&](bool enabled,
-                                  bool attempted,
-                                  bool succeeded,
-                                  double duration_ms) {
+  auto summarise_projection = [&](bool enabled, bool attempted, bool succeeded, double duration_ms) {
     if (!enabled) {
       return std::string{};
     }
@@ -1055,10 +1032,12 @@ void ImageReprojection::processFrame(int64_t frame_key,
   };
 
   std::string planar_lookup_summary = summarise_lookup(enable_planar_, planar_lookup_attempted, false, planar_lookup_ms);
-  std::string equirect_lookup_summary = summarise_lookup(enable_equirectangular_, equirect_lookup_attempted, equirect_lookup_reused, equirect_lookup_ms);
+  std::string equirect_lookup_summary =
+      summarise_lookup(enable_equirectangular_, equirect_lookup_attempted, equirect_lookup_reused, equirect_lookup_ms);
 
   std::string planar_projection_summary = summarise_projection(enable_planar_, planar_attempted, planar_success, planar_ms);
-  std::string equirect_projection_summary = summarise_projection(enable_equirectangular_, equirect_attempted, equirect_success, equirect_ms);
+  std::string equirect_projection_summary =
+      summarise_projection(enable_equirectangular_, equirect_attempted, equirect_success, equirect_ms);
 
   std::string success_list;
   if (planar_success) {
@@ -1108,7 +1087,7 @@ void ImageReprojection::processFrame(int64_t frame_key,
   restore_images();
 }
 
-void ImageReprojection::cleanupAccumulators(const rclcpp::Time &current_stamp) {
+void ImageReprojection::cleanupAccumulators(const rclcpp::Time& current_stamp) {
   if (accumulator_timeout_sec_ <= 0.0) {
     return;
   }
@@ -1123,12 +1102,12 @@ void ImageReprojection::cleanupAccumulators(const rclcpp::Time &current_stamp) {
   }
 }
 
-bool ImageReprojection::lookupCameraTransforms(const rclcpp::Time &stamp,
-                                               const std::vector<std::string> &camera_frames,
-                                               const std::string &target_frame,
-                                               std::vector<tf2::Transform> &transforms,
+bool ImageReprojection::lookupCameraTransforms(const rclcpp::Time& stamp,
+                                               const std::vector<std::string>& camera_frames,
+                                               const std::string& target_frame,
+                                               std::vector<tf2::Transform>& transforms,
                                                bool planar_projection,
-                                               const std::vector<bool> *camera_mask) {
+                                               const std::vector<bool>* camera_mask) {
   if (!tf_buffer_) {
     RCLCPP_ERROR(get_logger(), "TF buffer is not initialised.");
     return false;
@@ -1150,8 +1129,8 @@ bool ImageReprojection::lookupCameraTransforms(const rclcpp::Time &stamp,
     return (*camera_mask)[idx];
   };
 
-  auto &cached_transforms = planar_projection ? cached_planar_transforms_ : cached_equirect_transforms_;
-  auto &cache_ready = planar_projection ? planar_tf_ready_ : equirect_tf_ready_;
+  auto& cached_transforms = planar_projection ? cached_planar_transforms_ : cached_equirect_transforms_;
+  auto& cache_ready = planar_projection ? planar_tf_ready_ : equirect_tf_ready_;
   const bool use_cache = !recompute_every_frame_;
   const tf2::Duration timeout = tf2::durationFromSec(transform_timeout_sec_);
 
@@ -1211,8 +1190,8 @@ bool ImageReprojection::lookupCameraTransforms(const rclcpp::Time &stamp,
     }
 
     try {
-      const geometry_msgs::msg::TransformStamped tf_msg = tf_buffer_->lookupTransform(
-          camera_frames[i], target_frame, recompute_every_frame_ ? stamp : rclcpp::Time(0), timeout);
+      const geometry_msgs::msg::TransformStamped tf_msg =
+          tf_buffer_->lookupTransform(camera_frames[i], target_frame, recompute_every_frame_ ? stamp : rclcpp::Time(0), timeout);
       tf2::fromMsg(tf_msg.transform, transforms[i]);
       if (use_cache) {
         const bool was_ready = cache_ready[i];
@@ -1227,12 +1206,9 @@ bool ImageReprojection::lookupCameraTransforms(const rclcpp::Time &stamp,
           cache_updated = true;
         }
       }
-    } catch (const tf2::TransformException &ex) {
-      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
-                           "Failed to lookup transform from '%s' to '%s': %s",
-                           target_frame.c_str(),
-                           camera_frames[i].c_str(),
-                           ex.what());
+    } catch (const tf2::TransformException& ex) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "Failed to lookup transform from '%s' to '%s': %s",
+                           target_frame.c_str(), camera_frames[i].c_str(), ex.what());
       return false;
     }
   }
@@ -1245,7 +1221,7 @@ bool ImageReprojection::lookupCameraTransforms(const rclcpp::Time &stamp,
   return true;
 }
 
-void ImageReprojection::cameraInfoCallback(size_t index, const CameraInfo::ConstSharedPtr &info) {
+void ImageReprojection::cameraInfoCallback(size_t index, const CameraInfo::ConstSharedPtr& info) {
   if (index >= input_configs_.size()) return;
   CameraIntrinsics intr;
   if (!extractIntrinsics(info, intr, get_logger())) return;
@@ -1272,28 +1248,30 @@ void ImageReprojection::cameraInfoCallback(size_t index, const CameraInfo::Const
   if (enable_planar_ && !planar_frame_id_.empty()) {
     try {
       const bool was_ready = planar_tf_ready_[index];
-      const auto tf_msg = tf_buffer_->lookupTransform(camera_frame_ids_[index], planar_frame_id_, rclcpp::Time(0), tf2::durationFromSec(transform_timeout_sec_));
+      const auto tf_msg = tf_buffer_->lookupTransform(camera_frame_ids_[index], planar_frame_id_, rclcpp::Time(0),
+                                                      tf2::durationFromSec(transform_timeout_sec_));
       tf2::fromMsg(tf_msg.transform, cached_planar_transforms_[index]);
       planar_tf_ready_[index] = true;
       updatePlanarWarpCache(index);
       if (!was_ready) {
         require_export = true;
       }
-    } catch (const tf2::TransformException &ex) {
+    } catch (const tf2::TransformException& ex) {
       RCLCPP_DEBUG(get_logger(), "Planar transform not yet available for cam %zu: %s", index, ex.what());
     }
   }
   if (enable_equirectangular_ && !equirect_frame_id_.empty()) {
     try {
       const bool was_ready = equirect_tf_ready_[index];
-      const auto tf_msg = tf_buffer_->lookupTransform(camera_frame_ids_[index], equirect_frame_id_, rclcpp::Time(0), tf2::durationFromSec(transform_timeout_sec_));
+      const auto tf_msg = tf_buffer_->lookupTransform(camera_frame_ids_[index], equirect_frame_id_, rclcpp::Time(0),
+                                                      tf2::durationFromSec(transform_timeout_sec_));
       tf2::fromMsg(tf_msg.transform, cached_equirect_transforms_[index]);
       equirect_tf_ready_[index] = true;
       updateEquirectWarpCache(index);
       if (!was_ready) {
         require_export = true;
       }
-    } catch (const tf2::TransformException &ex) {
+    } catch (const tf2::TransformException& ex) {
       RCLCPP_DEBUG(get_logger(), "Equirect transform not yet available for cam %zu: %s", index, ex.what());
     }
   }
@@ -1323,11 +1301,11 @@ void ImageReprojection::updatePlanarWarpCache(size_t index) {
   }
 
   const size_t pixel_count = static_cast<size_t>(width) * height;
-  auto &mapping = planar_warp_maps_[index];
+  auto& mapping = planar_warp_maps_[index];
   mapping.resize(pixel_count);
 
-  const auto &intr = static_intrinsics_[index];
-  const tf2::Transform &transform = cached_planar_transforms_[index];
+  const auto& intr = static_intrinsics_[index];
+  const tf2::Transform& transform = cached_planar_transforms_[index];
   const double fx_in = intr.fx;
   const double fy_in = intr.fy;
   const double cx_in = intr.cx;
@@ -1335,17 +1313,15 @@ void ImageReprojection::updatePlanarWarpCache(size_t index) {
   const int width_in = intr.width;
   const int height_in = intr.height;
 
-  const auto &x_norm = planar_x_norm_;
-  const auto &y_norm = planar_y_norm_;
+  const auto& x_norm = planar_x_norm_;
+  const auto& y_norm = planar_y_norm_;
 
   for (int v = 0; v < height; ++v) {
     for (int u = 0; u < width; ++u) {
       const size_t pixel_index = static_cast<size_t>(v) * width + u;
-      auto &entry = mapping[pixel_index];
+      auto& entry = mapping[pixel_index];
 
-      const tf2::Vector3 point_virtual(x_norm[u] * planar_depth_,
-                                       y_norm[v] * planar_depth_,
-                                       planar_depth_);
+      const tf2::Vector3 point_virtual(x_norm[u] * planar_depth_, y_norm[v] * planar_depth_, planar_depth_);
       const tf2::Vector3 point_input = transform * point_virtual;
 
       const double z = point_input.z();
@@ -1358,8 +1334,7 @@ void ImageReprojection::updatePlanarWarpCache(size_t index) {
       const double u_in = fx_in * (point_input.x() * inv_z) + cx_in;
       const double v_in = fy_in * (point_input.y() * inv_z) + cy_in;
 
-      if (u_in < 0.0 || u_in > static_cast<double>(width_in - 1) ||
-          v_in < 0.0 || v_in > static_cast<double>(height_in - 1)) {
+      if (u_in < 0.0 || u_in > static_cast<double>(width_in - 1) || v_in < 0.0 || v_in > static_cast<double>(height_in - 1)) {
         entry = PixelMapping{};
         continue;
       }
@@ -1391,11 +1366,11 @@ void ImageReprojection::updateEquirectWarpCache(size_t index) {
   }
 
   const size_t pixel_count = static_cast<size_t>(width) * height;
-  auto &mapping = equirect_warp_maps_[index];
+  auto& mapping = equirect_warp_maps_[index];
   mapping.resize(pixel_count);
 
-  const auto &intr = static_intrinsics_[index];
-  const tf2::Transform &transform = cached_equirect_transforms_[index];
+  const auto& intr = static_intrinsics_[index];
+  const tf2::Transform& transform = cached_equirect_transforms_[index];
   const double fx_in = intr.fx;
   const double fy_in = intr.fy;
   const double cx_in = intr.cx;
@@ -1409,13 +1384,11 @@ void ImageReprojection::updateEquirectWarpCache(size_t index) {
 
     for (int u = 0; u < width; ++u) {
       const size_t pixel_index = static_cast<size_t>(v) * width + u;
-      auto &entry = mapping[pixel_index];
+      auto& entry = mapping[pixel_index];
       const double sin_lon = equirect_sin_lon_[u];
       const double cos_lon = equirect_cos_lon_[u];
 
-      tf2::Vector3 direction(cos_lat * sin_lon,
-                             -sin_lat,
-                             cos_lat * cos_lon);
+      tf2::Vector3 direction(cos_lat * sin_lon, -sin_lat, cos_lat * cos_lon);
       const tf2::Vector3 point_virtual = direction * equirect_radius_;
       const tf2::Vector3 point_input = transform * point_virtual;
 
@@ -1429,8 +1402,7 @@ void ImageReprojection::updateEquirectWarpCache(size_t index) {
       const double u_in = fx_in * (point_input.x() * inv_z) + cx_in;
       const double v_in = fy_in * (point_input.y() * inv_z) + cy_in;
 
-      if (u_in < 0.0 || u_in > static_cast<double>(width_in - 1) ||
-          v_in < 0.0 || v_in > static_cast<double>(height_in - 1)) {
+      if (u_in < 0.0 || u_in > static_cast<double>(width_in - 1) || v_in < 0.0 || v_in > static_cast<double>(height_in - 1)) {
         entry = PixelMapping{};
         continue;
       }
@@ -1462,8 +1434,8 @@ void ImageReprojection::preparePlanarScratchBuffers(size_t camera_count) const {
   }
 
   for (size_t i = 0; i < camera_count; ++i) {
-    auto &acc = planar_accumulators_[i];
-    auto &weights = planar_weights_[i];
+    auto& acc = planar_accumulators_[i];
+    auto& weights = planar_weights_[i];
     const size_t acc_size = pixel_count * 3;
     if (acc.size() != acc_size) {
       acc.assign(acc_size, 0.0f);
@@ -1497,8 +1469,8 @@ void ImageReprojection::prepareEquirectScratchBuffers(size_t camera_count) const
   }
 
   for (size_t i = 0; i < camera_count; ++i) {
-    auto &acc = equirect_accumulators_[i];
-    auto &weights = equirect_weights_[i];
+    auto& acc = equirect_accumulators_[i];
+    auto& weights = equirect_weights_[i];
     const size_t acc_size = pixel_count * 3;
     if (acc.size() != acc_size) {
       acc.assign(acc_size, 0.0f);
@@ -1513,20 +1485,19 @@ void ImageReprojection::prepareEquirectScratchBuffers(size_t camera_count) const
   }
 }
 
-bool ImageReprojection::reprojectEquirectangular(const std::vector<BgrImage> &input_images,
-                                                 const std::vector<CameraIntrinsics> &intrinsics,
-                                                 const std::vector<tf2::Transform> &transforms,
-                                                 const std::vector<bool> *camera_mask,
-                                                 sensor_msgs::msg::Image &output_image) const {
+bool ImageReprojection::reprojectEquirectangular(const std::vector<BgrImage>& input_images,
+                                                 const std::vector<CameraIntrinsics>& intrinsics,
+                                                 const std::vector<tf2::Transform>& transforms,
+                                                 const std::vector<bool>* camera_mask,
+                                                 sensor_msgs::msg::Image& output_image) const {
   if (input_images.empty()) {
     RCLCPP_WARN(get_logger(), "No input images available for equirectangular reprojection.");
     return false;
   }
 
   if (intrinsics.size() != input_images.size() || transforms.size() != input_images.size()) {
-    RCLCPP_ERROR(get_logger(),
-                 "Inconsistent input sizes: %zu images, %zu intrinsics, %zu transforms.",
-                 input_images.size(), intrinsics.size(), transforms.size());
+    RCLCPP_ERROR(get_logger(), "Inconsistent input sizes: %zu images, %zu intrinsics, %zu transforms.", input_images.size(),
+                 intrinsics.size(), transforms.size());
     return false;
   }
 
@@ -1541,9 +1512,7 @@ bool ImageReprojection::reprojectEquirectangular(const std::vector<BgrImage> &in
   const size_t camera_count = input_images.size();
 
   const bool has_mask = camera_mask && camera_mask->size() == camera_count;
-  auto camera_enabled = [&](size_t idx) {
-    return !has_mask || (*camera_mask)[idx];
-  };
+  auto camera_enabled = [&](size_t idx) { return !has_mask || (*camera_mask)[idx]; };
 
   size_t active_count = 0;
   for (size_t i = 0; i < camera_count; ++i) {
@@ -1557,8 +1526,8 @@ bool ImageReprojection::reprojectEquirectangular(const std::vector<BgrImage> &in
   }
 
   prepareEquirectScratchBuffers(camera_count);
-  auto &accumulators = equirect_accumulators_;
-  auto &weights = equirect_weights_;
+  auto& accumulators = equirect_accumulators_;
+  auto& weights = equirect_weights_;
 
   bool use_precomputed = !recompute_every_frame_;
   if (use_precomputed) {
@@ -1577,8 +1546,7 @@ bool ImageReprojection::reprojectEquirectangular(const std::vector<BgrImage> &in
         use_precomputed = false;
         break;
       }
-      if (intrinsics[i].width != input_images[i].width ||
-          intrinsics[i].height != input_images[i].height) {
+      if (intrinsics[i].width != input_images[i].width || intrinsics[i].height != input_images[i].height) {
         use_precomputed = false;
         break;
       }
@@ -1590,24 +1558,24 @@ bool ImageReprojection::reprojectEquirectangular(const std::vector<BgrImage> &in
       continue;
     }
 
-    const auto &intr = intrinsics[i];
-    const BgrImage &image = input_images[i];
+    const auto& intr = intrinsics[i];
+    const BgrImage& image = input_images[i];
     if (image.width <= 0 || image.height <= 0) {
       continue;
     }
 
-    auto &acc = accumulators[i];
-    auto &weight_buffer = weights[i];
+    auto& acc = accumulators[i];
+    auto& weight_buffer = weights[i];
 
     if (use_precomputed) {
-      const auto &mapping = equirect_warp_maps_[i];
+      const auto& mapping = equirect_warp_maps_[i];
       const int width_in = image.width;
       const int height_in = image.height;
       const double max_u = static_cast<double>(width_in - 1);
       const double max_v = static_cast<double>(height_in - 1);
 
       for (size_t pixel_index = 0; pixel_index < pixel_count; ++pixel_index) {
-        const auto &entry = mapping[pixel_index];
+        const auto& entry = mapping[pixel_index];
         if (!std::isfinite(entry.u) || !std::isfinite(entry.v)) {
           continue;
         }
@@ -1615,8 +1583,7 @@ bool ImageReprojection::reprojectEquirectangular(const std::vector<BgrImage> &in
           continue;
         }
 
-        const std::array<float, 3> colour =
-            bilinearSample(image, static_cast<double>(entry.u), static_cast<double>(entry.v));
+        const std::array<float, 3> colour = bilinearSample(image, static_cast<double>(entry.u), static_cast<double>(entry.v));
         const size_t base_index = pixel_index * 3;
         acc[base_index + 0] += colour[0];
         acc[base_index + 1] += colour[1];
@@ -1626,7 +1593,7 @@ bool ImageReprojection::reprojectEquirectangular(const std::vector<BgrImage> &in
       continue;
     }
 
-    const tf2::Transform &transform = transforms[i];
+    const tf2::Transform& transform = transforms[i];
     const double fx_in = intr.fx;
     const double fy_in = intr.fy;
     const double cx_in = intr.cx;
@@ -1637,10 +1604,7 @@ bool ImageReprojection::reprojectEquirectangular(const std::vector<BgrImage> &in
     if (intr.width != width_in || intr.height != height_in) {
       RCLCPP_WARN_ONCE(get_logger(),
                        "CameraInfo resolution (%dx%d) differs from image resolution (%dx%d). Using image resolution for bounds.",
-                       intr.width,
-                       intr.height,
-                       width_in,
-                       height_in);
+                       intr.width, intr.height, width_in, height_in);
     }
 
     for (int v = 0; v < height; ++v) {
@@ -1651,9 +1615,7 @@ bool ImageReprojection::reprojectEquirectangular(const std::vector<BgrImage> &in
         const double sin_lon = equirect_sin_lon_[u];
         const double cos_lon = equirect_cos_lon_[u];
 
-        tf2::Vector3 direction(cos_lat * sin_lon,
-                               -sin_lat,
-                               cos_lat * cos_lon);
+        tf2::Vector3 direction(cos_lat * sin_lon, -sin_lat, cos_lat * cos_lon);
         const tf2::Vector3 point_virtual = direction * equirect_radius_;
         const tf2::Vector3 point_input = transform * point_virtual;
 
@@ -1666,8 +1628,7 @@ bool ImageReprojection::reprojectEquirectangular(const std::vector<BgrImage> &in
         const double u_in = fx_in * (point_input.x() * inv_z) + cx_in;
         const double v_in = fy_in * (point_input.y() * inv_z) + cy_in;
 
-        if (u_in < 0.0 || u_in > static_cast<double>(width_in - 1) ||
-            v_in < 0.0 || v_in > static_cast<double>(height_in - 1)) {
+        if (u_in < 0.0 || u_in > static_cast<double>(width_in - 1) || v_in < 0.0 || v_in > static_cast<double>(height_in - 1)) {
           continue;
         }
 
@@ -1689,7 +1650,7 @@ bool ImageReprojection::reprojectEquirectangular(const std::vector<BgrImage> &in
   output_image.step = static_cast<uint32_t>(width * 3);
   output_image.data.resize(output_image.step * output_image.height);
 
-  const auto colour_from_accumulator = [](const std::vector<float> &acc, float weight, size_t base_index) {
+  const auto colour_from_accumulator = [](const std::vector<float>& acc, float weight, size_t base_index) {
     std::array<float, 3> colour{0.0f, 0.0f, 0.0f};
     if (weight > 0.0f) {
       const float inv_weight = 1.0f / weight;
@@ -1706,7 +1667,7 @@ bool ImageReprojection::reprojectEquirectangular(const std::vector<BgrImage> &in
     for (int u = 0; u < width; ++u) {
       const size_t pixel_index = static_cast<size_t>(v) * width + u;
       const size_t base_index = pixel_index * 3;
-      uint8_t *pixel = &output_image.data[base_index];
+      uint8_t* pixel = &output_image.data[base_index];
 
       float total_weight = 0.0f;
       float max_weight = -1.0f;
@@ -1749,8 +1710,8 @@ bool ImageReprojection::reprojectEquirectangular(const std::vector<BgrImage> &in
       }
 
       for (size_t channel = 0; channel < 3; ++channel) {
-        const float blended_value = static_cast<float>((1.0f - blend_factor) * dominant_colour[channel] +
-                                                      blend_factor * average_colour[channel]);
+        const float blended_value =
+            static_cast<float>((1.0f - blend_factor) * dominant_colour[channel] + blend_factor * average_colour[channel]);
         pixel[channel] = static_cast<uint8_t>(std::clamp(blended_value, 0.0f, 255.0f));
       }
     }
@@ -1759,7 +1720,7 @@ bool ImageReprojection::reprojectEquirectangular(const std::vector<BgrImage> &in
   return true;
 }
 
-bool ImageReprojection::toBgrImage(const Image::ConstSharedPtr &msg, BgrImage &output, const rclcpp::Logger &logger) {
+bool ImageReprojection::toBgrImage(const Image::ConstSharedPtr& msg, BgrImage& output, const rclcpp::Logger& logger) {
   const int width = static_cast<int>(msg->width);
   const int height = static_cast<int>(msg->height);
   if (width <= 0 || height <= 0) {
@@ -1769,13 +1730,14 @@ bool ImageReprojection::toBgrImage(const Image::ConstSharedPtr &msg, BgrImage &o
 
   const auto encoding = msg->encoding;
   const int src_channels =
-      (encoding == sensor_msgs::image_encodings::BGR8 || encoding == sensor_msgs::image_encodings::RGB8) ? 3 :
-      (encoding == sensor_msgs::image_encodings::MONO8 ? 1 :
-       (encoding == sensor_msgs::image_encodings::BGRA8 || encoding == sensor_msgs::image_encodings::RGBA8 ? 4 : 0));
+      (encoding == sensor_msgs::image_encodings::BGR8 || encoding == sensor_msgs::image_encodings::RGB8)
+          ? 3
+          : (encoding == sensor_msgs::image_encodings::MONO8
+                 ? 1
+                 : (encoding == sensor_msgs::image_encodings::BGRA8 || encoding == sensor_msgs::image_encodings::RGBA8 ? 4 : 0));
 
   if (src_channels == 0) {
-    RCLCPP_ERROR(logger,
-                 "Unsupported image encoding '%s'. Supported encodings: BGR8, RGB8, BGRA8, RGBA8, MONO8.",
+    RCLCPP_ERROR(logger, "Unsupported image encoding '%s'. Supported encodings: BGR8, RGB8, BGRA8, RGBA8, MONO8.",
                  encoding.c_str());
     return false;
   }
@@ -1791,14 +1753,14 @@ bool ImageReprojection::toBgrImage(const Image::ConstSharedPtr &msg, BgrImage &o
   output.height = height;
   output.data.assign(static_cast<size_t>(width) * height * 3, 0);
 
-  const uint8_t *src_data = msg->data.data();
-  uint8_t *dst_data = output.data.data();
+  const uint8_t* src_data = msg->data.data();
+  uint8_t* dst_data = output.data.data();
   const size_t dst_stride = static_cast<size_t>(width) * 3;
 
   if (encoding == sensor_msgs::image_encodings::BGR8) {
     for (int row = 0; row < height; ++row) {
-      const uint8_t *src_row = src_data + static_cast<size_t>(row) * src_stride;
-      uint8_t *dst_row = dst_data + static_cast<size_t>(row) * dst_stride;
+      const uint8_t* src_row = src_data + static_cast<size_t>(row) * src_stride;
+      uint8_t* dst_row = dst_data + static_cast<size_t>(row) * dst_stride;
       std::copy(src_row, src_row + dst_stride, dst_row);
     }
     return true;
@@ -1806,8 +1768,8 @@ bool ImageReprojection::toBgrImage(const Image::ConstSharedPtr &msg, BgrImage &o
 
   if (encoding == sensor_msgs::image_encodings::RGB8) {
     for (int row = 0; row < height; ++row) {
-      const uint8_t *src_row = src_data + static_cast<size_t>(row) * src_stride;
-      uint8_t *dst_row = dst_data + static_cast<size_t>(row) * dst_stride;
+      const uint8_t* src_row = src_data + static_cast<size_t>(row) * src_stride;
+      uint8_t* dst_row = dst_data + static_cast<size_t>(row) * dst_stride;
       for (int col = 0; col < width; ++col) {
         const size_t src_index = static_cast<size_t>(col) * 3;
         dst_row[src_index + 0] = src_row[src_index + 2];
@@ -1820,8 +1782,8 @@ bool ImageReprojection::toBgrImage(const Image::ConstSharedPtr &msg, BgrImage &o
 
   if (encoding == sensor_msgs::image_encodings::BGRA8) {
     for (int row = 0; row < height; ++row) {
-      const uint8_t *src_row = src_data + static_cast<size_t>(row) * src_stride;
-      uint8_t *dst_row = dst_data + static_cast<size_t>(row) * dst_stride;
+      const uint8_t* src_row = src_data + static_cast<size_t>(row) * src_stride;
+      uint8_t* dst_row = dst_data + static_cast<size_t>(row) * dst_stride;
       for (int col = 0; col < width; ++col) {
         const size_t src_index = static_cast<size_t>(col) * 4;
         const size_t dst_index = static_cast<size_t>(col) * 3;
@@ -1835,8 +1797,8 @@ bool ImageReprojection::toBgrImage(const Image::ConstSharedPtr &msg, BgrImage &o
 
   if (encoding == sensor_msgs::image_encodings::RGBA8) {
     for (int row = 0; row < height; ++row) {
-      const uint8_t *src_row = src_data + static_cast<size_t>(row) * src_stride;
-      uint8_t *dst_row = dst_data + static_cast<size_t>(row) * dst_stride;
+      const uint8_t* src_row = src_data + static_cast<size_t>(row) * src_stride;
+      uint8_t* dst_row = dst_data + static_cast<size_t>(row) * dst_stride;
       for (int col = 0; col < width; ++col) {
         const size_t src_index = static_cast<size_t>(col) * 4;
         const size_t dst_index = static_cast<size_t>(col) * 3;
@@ -1850,8 +1812,8 @@ bool ImageReprojection::toBgrImage(const Image::ConstSharedPtr &msg, BgrImage &o
 
   if (encoding == sensor_msgs::image_encodings::MONO8) {
     for (int row = 0; row < height; ++row) {
-      const uint8_t *src_row = src_data + static_cast<size_t>(row) * src_stride;
-      uint8_t *dst_row = dst_data + static_cast<size_t>(row) * dst_stride;
+      const uint8_t* src_row = src_data + static_cast<size_t>(row) * src_stride;
+      uint8_t* dst_row = dst_data + static_cast<size_t>(row) * dst_stride;
       for (int col = 0; col < width; ++col) {
         const uint8_t value = src_row[col];
         const size_t dst_index = static_cast<size_t>(col) * 3;
@@ -1863,15 +1825,14 @@ bool ImageReprojection::toBgrImage(const Image::ConstSharedPtr &msg, BgrImage &o
     return true;
   }
 
-  RCLCPP_ERROR(logger,
-               "Unsupported image encoding '%s'. Supported encodings: BGR8, RGB8, BGRA8, RGBA8, MONO8.",
+  RCLCPP_ERROR(logger, "Unsupported image encoding '%s'. Supported encodings: BGR8, RGB8, BGRA8, RGBA8, MONO8.",
                encoding.c_str());
   return false;
 }
 
-bool ImageReprojection::extractIntrinsics(const CameraInfo::ConstSharedPtr &info,
-                                          CameraIntrinsics &intrinsics,
-                                          const rclcpp::Logger &logger) {
+bool ImageReprojection::extractIntrinsics(const CameraInfo::ConstSharedPtr& info,
+                                          CameraIntrinsics& intrinsics,
+                                          const rclcpp::Logger& logger) {
   if (info->k.size() != 9) {
     RCLCPP_ERROR(logger, "CameraInfo K matrix must have 9 elements.");
     return false;
@@ -1897,20 +1858,19 @@ bool ImageReprojection::extractIntrinsics(const CameraInfo::ConstSharedPtr &info
   return true;
 }
 
-bool ImageReprojection::reprojectPlanar(const std::vector<BgrImage> &input_images,
-                                        const std::vector<CameraIntrinsics> &intrinsics,
-                                        const std::vector<tf2::Transform> &transforms,
-                                        const std::vector<bool> *camera_mask,
-                                        sensor_msgs::msg::Image &output_image) const {
+bool ImageReprojection::reprojectPlanar(const std::vector<BgrImage>& input_images,
+                                        const std::vector<CameraIntrinsics>& intrinsics,
+                                        const std::vector<tf2::Transform>& transforms,
+                                        const std::vector<bool>* camera_mask,
+                                        sensor_msgs::msg::Image& output_image) const {
   if (input_images.empty()) {
     RCLCPP_WARN(get_logger(), "No input images available for reprojection.");
     return false;
   }
 
   if (intrinsics.size() != input_images.size() || transforms.size() != input_images.size()) {
-    RCLCPP_ERROR(get_logger(),
-                 "Inconsistent input sizes: %zu images, %zu intrinsics, %zu transforms.",
-                 input_images.size(), intrinsics.size(), transforms.size());
+    RCLCPP_ERROR(get_logger(), "Inconsistent input sizes: %zu images, %zu intrinsics, %zu transforms.", input_images.size(),
+                 intrinsics.size(), transforms.size());
     return false;
   }
 
@@ -1925,9 +1885,7 @@ bool ImageReprojection::reprojectPlanar(const std::vector<BgrImage> &input_image
   const size_t camera_count = input_images.size();
 
   const bool has_mask = camera_mask && camera_mask->size() == camera_count;
-  auto camera_enabled = [&](size_t idx) {
-    return !has_mask || (*camera_mask)[idx];
-  };
+  auto camera_enabled = [&](size_t idx) { return !has_mask || (*camera_mask)[idx]; };
 
   size_t active_count = 0;
   for (size_t i = 0; i < camera_count; ++i) {
@@ -1941,8 +1899,8 @@ bool ImageReprojection::reprojectPlanar(const std::vector<BgrImage> &input_image
   }
 
   preparePlanarScratchBuffers(camera_count);
-  auto &accumulators = planar_accumulators_;
-  auto &weights = planar_weights_;
+  auto& accumulators = planar_accumulators_;
+  auto& weights = planar_weights_;
 
   bool use_precomputed = !recompute_every_frame_;
   if (use_precomputed) {
@@ -1961,40 +1919,39 @@ bool ImageReprojection::reprojectPlanar(const std::vector<BgrImage> &input_image
         use_precomputed = false;
         break;
       }
-      if (intrinsics[i].width != input_images[i].width ||
-          intrinsics[i].height != input_images[i].height) {
+      if (intrinsics[i].width != input_images[i].width || intrinsics[i].height != input_images[i].height) {
         use_precomputed = false;
         break;
       }
     }
   }
 
-  const auto &x_norm = planar_x_norm_;
-  const auto &y_norm = planar_y_norm_;
+  const auto& x_norm = planar_x_norm_;
+  const auto& y_norm = planar_y_norm_;
 
   for (size_t i = 0; i < camera_count; ++i) {
     if (!camera_enabled(i)) {
       continue;
     }
 
-    const auto &intr = intrinsics[i];
-    const BgrImage &image = input_images[i];
+    const auto& intr = intrinsics[i];
+    const BgrImage& image = input_images[i];
     if (image.width <= 0 || image.height <= 0) {
       continue;
     }
 
-    auto &acc = accumulators[i];
-    auto &weight_buffer = weights[i];
+    auto& acc = accumulators[i];
+    auto& weight_buffer = weights[i];
 
     if (use_precomputed) {
-      const auto &mapping = planar_warp_maps_[i];
+      const auto& mapping = planar_warp_maps_[i];
       const int width_in = image.width;
       const int height_in = image.height;
       const double max_u = static_cast<double>(width_in - 1);
       const double max_v = static_cast<double>(height_in - 1);
 
       for (size_t pixel_index = 0; pixel_index < pixel_count; ++pixel_index) {
-        const auto &entry = mapping[pixel_index];
+        const auto& entry = mapping[pixel_index];
         if (!std::isfinite(entry.u) || !std::isfinite(entry.v)) {
           continue;
         }
@@ -2003,8 +1960,7 @@ bool ImageReprojection::reprojectPlanar(const std::vector<BgrImage> &input_image
           continue;
         }
 
-        const std::array<float, 3> colour =
-            bilinearSample(image, static_cast<double>(entry.u), static_cast<double>(entry.v));
+        const std::array<float, 3> colour = bilinearSample(image, static_cast<double>(entry.u), static_cast<double>(entry.v));
         const size_t base_index = pixel_index * 3;
         acc[base_index + 0] += colour[0];
         acc[base_index + 1] += colour[1];
@@ -2014,7 +1970,7 @@ bool ImageReprojection::reprojectPlanar(const std::vector<BgrImage> &input_image
       continue;
     }
 
-    const tf2::Transform &transform = transforms[i];
+    const tf2::Transform& transform = transforms[i];
     const double fx_in = intr.fx;
     const double fy_in = intr.fy;
     const double cx_in = intr.cx;
@@ -2025,17 +1981,12 @@ bool ImageReprojection::reprojectPlanar(const std::vector<BgrImage> &input_image
     if (intr.width != width_in || intr.height != height_in) {
       RCLCPP_WARN_ONCE(get_logger(),
                        "CameraInfo resolution (%dx%d) differs from image resolution (%dx%d). Using image resolution for bounds.",
-                       intr.width,
-                       intr.height,
-                       width_in,
-                       height_in);
+                       intr.width, intr.height, width_in, height_in);
     }
 
     for (int v = 0; v < height; ++v) {
       for (int u = 0; u < width; ++u) {
-        const tf2::Vector3 point_virtual(x_norm[u] * planar_depth_,
-                                         y_norm[v] * planar_depth_,
-                                         planar_depth_);
+        const tf2::Vector3 point_virtual(x_norm[u] * planar_depth_, y_norm[v] * planar_depth_, planar_depth_);
         const tf2::Vector3 point_input = transform * point_virtual;
 
         const double z = point_input.z();
@@ -2047,8 +1998,7 @@ bool ImageReprojection::reprojectPlanar(const std::vector<BgrImage> &input_image
         const double u_in = fx_in * (point_input.x() * inv_z) + cx_in;
         const double v_in = fy_in * (point_input.y() * inv_z) + cy_in;
 
-        if (u_in < 0.0 || u_in > static_cast<double>(width_in - 1) ||
-            v_in < 0.0 || v_in > static_cast<double>(height_in - 1)) {
+        if (u_in < 0.0 || u_in > static_cast<double>(width_in - 1) || v_in < 0.0 || v_in > static_cast<double>(height_in - 1)) {
           continue;
         }
 
@@ -2070,7 +2020,7 @@ bool ImageReprojection::reprojectPlanar(const std::vector<BgrImage> &input_image
   output_image.step = static_cast<uint32_t>(width * 3);
   output_image.data.resize(output_image.step * output_image.height);
 
-  const auto colour_from_accumulator = [](const std::vector<float> &acc, float weight, size_t base_index) {
+  const auto colour_from_accumulator = [](const std::vector<float>& acc, float weight, size_t base_index) {
     std::array<float, 3> colour{0.0f, 0.0f, 0.0f};
     if (weight > 0.0f) {
       const float inv_weight = 1.0f / weight;
@@ -2087,7 +2037,7 @@ bool ImageReprojection::reprojectPlanar(const std::vector<BgrImage> &input_image
     for (int u = 0; u < width; ++u) {
       const size_t pixel_index = static_cast<size_t>(v) * width + u;
       const size_t base_index = pixel_index * 3;
-      uint8_t *pixel = &output_image.data[base_index];
+      uint8_t* pixel = &output_image.data[base_index];
 
       float total_weight = 0.0f;
       float max_weight = -1.0f;
@@ -2130,8 +2080,8 @@ bool ImageReprojection::reprojectPlanar(const std::vector<BgrImage> &input_image
       }
 
       for (size_t channel = 0; channel < 3; ++channel) {
-        const float blended_value = static_cast<float>((1.0f - blend_factor) * dominant_colour[channel] +
-                                                      blend_factor * average_colour[channel]);
+        const float blended_value =
+            static_cast<float>((1.0f - blend_factor) * dominant_colour[channel] + blend_factor * average_colour[channel]);
         pixel[channel] = static_cast<uint8_t>(std::clamp(blended_value, 0.0f, 255.0f));
       }
     }
@@ -2140,13 +2090,11 @@ bool ImageReprojection::reprojectPlanar(const std::vector<BgrImage> &input_image
   return true;
 }
 
-std::array<float, 3> ImageReprojection::bilinearSample(const BgrImage &image, double u, double v) {
+std::array<float, 3> ImageReprojection::bilinearSample(const BgrImage& image, double u, double v) {
   const int width = image.width;
   const int height = image.height;
 
-  const auto clamp_coord = [](int value, int max_value) {
-    return std::max(0, std::min(value, max_value));
-  };
+  const auto clamp_coord = [](int value, int max_value) { return std::max(0, std::min(value, max_value)); };
 
   const int x0 = clamp_coord(static_cast<int>(std::floor(u)), width - 1);
   const int y0 = clamp_coord(static_cast<int>(std::floor(v)), height - 1);
@@ -2158,10 +2106,8 @@ std::array<float, 3> ImageReprojection::bilinearSample(const BgrImage &image, do
 
   const auto get_pixel = [&](int x, int y) {
     const size_t index = (static_cast<size_t>(y) * width + x) * 3;
-    return std::array<float, 3>{
-        static_cast<float>(image.data[index + 0]),
-        static_cast<float>(image.data[index + 1]),
-        static_cast<float>(image.data[index + 2])};
+    return std::array<float, 3>{static_cast<float>(image.data[index + 0]), static_cast<float>(image.data[index + 1]),
+                                static_cast<float>(image.data[index + 2])};
   };
 
   const auto c00 = get_pixel(x0, y0);
