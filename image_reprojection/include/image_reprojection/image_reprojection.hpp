@@ -4,6 +4,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -73,9 +74,14 @@ class ImageReprojection : public rclcpp::Node {
   // No message_filters bundles; subscribe separately to images and camera infos
 
   void loadParameters();
+  void setupParameterCallback();
   void setupTopics();
   void configurePlanarCameraInfo();
   void configureEquirectCameraInfo();
+  void applyPlanarProjectionConfig(int width, int height, double depth, double fov_x_deg, double blend_factor);
+  void applyEquirectProjectionConfig(int width, int height, double radius, double fov_x_deg, double blend_factor);
+  void rebuildPlanarWarpCaches();
+  void rebuildEquirectWarpCaches();
   void imageCallback(size_t index, const Image::ConstSharedPtr& image);
   void cameraInfoCallback(size_t index, const CameraInfo::ConstSharedPtr& info);
   void cleanupAccumulators(const rclcpp::Time& current_stamp);
@@ -127,6 +133,7 @@ class ImageReprojection : public rclcpp::Node {
   double planar_cx_{0.0};
   double planar_cy_{0.0};
   double planar_depth_{1.0};
+  double planar_fov_x_deg_{90.0};
   double planar_blend_factor_{1.0};
   std::string planar_frame_id_{};
 
@@ -136,6 +143,7 @@ class ImageReprojection : public rclcpp::Node {
   int equirect_height_{0};
   double equirect_hfov_rad_{0.0};
   double equirect_vfov_rad_{0.0};
+  double equirect_fov_x_deg_{360.0};
   double equirect_blend_factor_{1.0};
   std::string equirect_frame_id_{};
   double equirect_radius_{1.0};
@@ -195,6 +203,8 @@ class ImageReprojection : public rclcpp::Node {
 
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_{};
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_{};
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr parameter_callback_handle_{};
+  mutable std::mutex state_mutex_{};
 };
 
 }  // namespace image_reprojection
