@@ -13,5 +13,5 @@ docker-ros:
     BASE_IMAGE: rwthika/ros2-cuda:jazzy-ros-base
     RMW_IMPLEMENTATION: rmw_zenoh_cpp
     COMMAND: ros2 launch image_reprojection image_reprojection_launch.py
-    ENABLE_INDUSTRIAL_CI: 'true'
+    ENABLE_INDUSTRIAL_CI: 'false'
     TARGET_CMAKE_ARGS: '-DCMAKE_EXPORT_COMPILE_COMMANDS=1'

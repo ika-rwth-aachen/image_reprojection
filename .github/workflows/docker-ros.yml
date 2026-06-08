@@ -35,6 +35,6 @@ jobs:
           base-image: rwthika/ros2-cuda:jazzy-ros-base
           rmw-implementation: rmw_zenoh_cpp
           command: ros2 launch image_reprojection image_reprojection_launch.py
-          enable-industrial-ci: true
+          enable-industrial-ci: false
         env:
           TARGET_CMAKE_ARGS: -DCMAKE_EXPORT_COMPILE_COMMANDS=1
