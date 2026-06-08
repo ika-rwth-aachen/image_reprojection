@@ -1,0 +1,63 @@
+/*/**:
+  ros__parameters:
+
+    input:
+      image_topics:
+        - /drivers/zed_camera/front_center/left/image_rect_color
+        - /drivers/zed_camera/front_left/left/image_rect_color
+        - /drivers/zed_camera/front_right/left/image_rect_color
+        - /drivers/zed_camera/mid_left/left/image_rect_color
+        - /drivers/zed_camera/mid_right/left/image_rect_color
+        - /drivers/zed_camera/rear_left/left/image_rect_color
+        - /drivers/zed_camera/rear_right/left/image_rect_color
+        # - /drivers/zed_camera/rear_center/left/image_rect_color
+      /drivers/zed_camera/front_left/left/image_rect_color:
+        image_transport: compressed
+        camera_info_topic: /drivers/zed_camera/front_left/left/camera_info
+      /drivers/zed_camera/front_center/left/image_rect_color:
+        image_transport: compressed
+        camera_info_topic: /drivers/zed_camera/front_center/left/camera_info
+      /drivers/zed_camera/front_right/left/image_rect_color:
+        image_transport: compressed
+        camera_info_topic: /drivers/zed_camera/front_right/left/camera_info
+      /drivers/zed_camera/mid_left/left/image_rect_color:
+        image_transport: compressed
+        camera_info_topic: /drivers/zed_camera/mid_left/left/camera_info
+      /drivers/zed_camera/mid_right/left/image_rect_color:
+        image_transport: compressed
+        camera_info_topic: /drivers/zed_camera/mid_right/left/camera_info
+      /drivers/zed_camera/rear_left/left/image_rect_color:
+        image_transport: compressed
+        camera_info_topic: /drivers/zed_camera/rear_left/left/camera_info
+      # /drivers/zed_camera/rear_center/left/image_rect_color:
+      #   image_transport: compressed
+      #   camera_info_topic: /drivers/zed_camera/rear_center/left/camera_info
+      /drivers/zed_camera/rear_right/left/image_rect_color:
+        image_transport: compressed
+        camera_info_topic: /drivers/zed_camera/rear_right/left/camera_info
+
+    output:
+      gstreamer:
+        config_export_path: /gstreamer/projection.planar-bev.json
+      projection:
+        planar:
+          enabled: true
+          image_topic: ~/planar_bev/image
+          camera_info_topic: ~/planar_bev/camera_info
+          optical_frame_id: bev_optical
+          width: 1920
+          height: 960
+          depth: 100.0
+          fov_x: 10.0
+          # fov_x_in_m = 2 * tan(fov_x / 2) * depth  = 17.50
+          # fov_y_in_m = fov_x_in_m * height / width =  8.75
+          blend_factor: 0.0
+        equirectangular:
+          enabled: false
+
+    params:
+      recompute_every_frame: false
+      transform_timeout: 0.05
+      frame_timeout: 0.1
+      frame_time_tolerance: 0.033
+      sync_mode: wait_all
