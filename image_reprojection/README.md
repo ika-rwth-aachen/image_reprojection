@@ -41,33 +41,33 @@ flowchart LR
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `input.image_topics` | `string[]` | TODO | images topics to process |
-| `input.<IMAGE_TOPIC>.image_transport` | `string` | TODO | image transport type for subscription |
-| `input.<IMAGE_TOPIC>.camera_info_topic` | `string` | TODO | corresponding camera info topic |
-| `output.projection.planar.enabled` | `bool` | TODO | whether to enable planar projection |
-| `output.projection.planar.image_topic` | `string` | TODO | output image topic |
-| `output.projection.planar.camera_info_topic` | `string` | TODO | output camera info topic |
-| `output.projection.planar.optical_frame_id` | `string` | TODO | frame in which projection plane is defined |
-| `output.projection.planar.width` | `int` | TODO | projection width |
-| `output.projection.planar.height` | `int` | TODO | projection height |
-| `output.projection.planar.depth` | `float` | TODO | location of projection plane in specified frame |
-| `output.projection.planar.fov_x` | `float` | TODO | horizontal field-of-view (vertical is computed via specified aspect ratio) |
-| `output.projection.planar.blend_factor` | `float` | TODO | factor by how much to blend between overlapping partitions of the output |
-| `output.projection.equirectangular.enabled` | `bool` | TODO | whether to enable equirectangular projection |
-| `output.projection.equirectangular.image_topic` | `string` | TODO | output image topic |
-| `output.projection.equirectangular.camera_info_topic` | `string` | TODO | output camera info topic |
-| `output.projection.equirectangular.optical_frame_id` | `string` | TODO | frame in which projection plane is defined |
-| `output.projection.equirectangular.width` | `int` | TODO | projection width |
-| `output.projection.equirectangular.height` | `int` | TODO | projection height |
-| `output.projection.equirectangular.radius` | `float` | TODO | radius of spherical projection plane around specified frame |
-| `output.projection.equirectangular.fov_x` | `float` | TODO | horizontal field-of-view (vertical is computed via specified aspect ratio) |
-| `output.projection.equirectangular.blend_factor` | `float` | TODO | factor by how much to blend between overlapping partitions of the output |
-| `output.gstreamer.config_export_path` | `string` | TODO | filepath for GStreamer config export |
-| `params.recompute_every_frame` | `bool` | TODO | whether to recompute projection every frame |
-| `params.transform_timeout` | `float` | TODO | how long to wait for transforms |
-| `params.frame_timeout` | `float` | TODO | how long to wait for frames from all inputs |
-| `params.frame_time_tolerance` | `float` | TODO | how much time stamp difference to accept between inputs |
-| `params.sync_mode` | `string` | TODO | `wait_all`: wait for all inputs; `lead_latest`: start publishing with leading after timeout has passed |
+| `input.image_topics` | `string[]` | `[]` | images topics to process |
+| `input.<IMAGE_TOPIC>.image_transport` | `string` | `"raw"` | image transport type for subscription |
+| `input.<IMAGE_TOPIC>.camera_info_topic` | `string` | `""` | corresponding camera info topic |
+| `output.projection.planar.enabled` | `bool` | `true` | whether to enable planar projection |
+| `output.projection.planar.image_topic` | `string` | `"~/output/planar/image"` | output image topic |
+| `output.projection.planar.camera_info_topic` | `string` | `"~/output/planar/camera_info"` | output camera info topic |
+| `output.projection.planar.optical_frame_id` | `string` | `""` | frame in which projection plane is defined |
+| `output.projection.planar.width` | `int` | `1280` | projection width |
+| `output.projection.planar.height` | `int` | `720` | projection height |
+| `output.projection.planar.depth` | `float` | `1.0` | location of projection plane in specified frame |
+| `output.projection.planar.fov_x` | `float` | `90.0` | horizontal field-of-view (vertical is computed via specified aspect ratio) |
+| `output.projection.planar.blend_factor` | `float` | `1.0` | factor by how much to blend between overlapping partitions of the output |
+| `output.projection.equirectangular.enabled` | `bool` | `false` | whether to enable equirectangular projection |
+| `output.projection.equirectangular.image_topic` | `string` | `"~/output/equirectangular/image"` | output image topic |
+| `output.projection.equirectangular.camera_info_topic` | `string` | `"~/output/equirectangular/camera_info"` | output camera info topic |
+| `output.projection.equirectangular.optical_frame_id` | `string` | `""` | frame in which projection plane is defined |
+| `output.projection.equirectangular.width` | `int` | `2048` | projection width |
+| `output.projection.equirectangular.height` | `int` | `1024` | projection height |
+| `output.projection.equirectangular.radius` | `float` | `1.0` | radius of spherical projection plane around specified frame |
+| `output.projection.equirectangular.fov_x` | `float` | `360.0` | horizontal field-of-view (vertical is computed via specified aspect ratio) |
+| `output.projection.equirectangular.blend_factor` | `float` | `1.0` | factor by how much to blend between overlapping partitions of the output |
+| `output.gstreamer.config_export_path` | `string` | `""` | filepath for GStreamer config export |
+| `params.recompute_every_frame` | `bool` | `false` | whether to recompute projection every frame |
+| `params.transform_timeout` | `float` | `0.05` | how long to wait for transforms |
+| `params.frame_timeout` | `float` | `1.0` | how long to wait for frames from all inputs |
+| `params.frame_time_tolerance` | `float` | `0.005` | how much time stamp difference to accept between inputs |
+| `params.sync_mode` | `string` | `"wait_all"` | `wait_all`: wait for all inputs; `lead_latest`: start publishing with leading after timeout has passed |
 
 ## Launch Files
 
