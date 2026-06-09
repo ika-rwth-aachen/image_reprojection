@@ -2,6 +2,7 @@ services:
 
   image-reprojection.planar120:
     image: ghcr.io/ika-rwth-aachen/image_reprojection:latest_open-source_ci # TODO: v1.0.0
+    command: ros2 launch image_reprojection image_reprojection_launch.py name:=image_reprojection_planar120
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
     volumes:
@@ -10,34 +11,35 @@ services:
 
   image-reprojection.equirectangular360:
     image: ghcr.io/ika-rwth-aachen/image_reprojection:latest_open-source_ci # TODO: v1.0.0
+    command: ros2 launch image_reprojection image_reprojection_launch.py name:=image_reprojection_equirectangular360
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
     volumes:
       - ./image_reprojection/params.equirectangular360.yml:/docker-ros/ws/install/image_reprojection/share/image_reprojection/config/params.yml
       - ./gstreamer:/gstreamer
 
-  image-reprojection.planar-bev:
-    image: ghcr.io/ika-rwth-aachen/image_reprojection:latest_open-source_ci # TODO: v1.0.0
-    environment:
-      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
-    volumes:
-      - ./image_reprojection/params.planar-bev.yml:/docker-ros/ws/install/image_reprojection/share/image_reprojection/config/params.yml
-      - ./gstreamer:/gstreamer
+  # image-reprojection.planar-bev:
+  #   image: ghcr.io/ika-rwth-aachen/image_reprojection:latest_open-source_ci # TODO: v1.0.0
+  #   environment:
+  #     RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+  #   volumes:
+  #     - ./image_reprojection/params.planar-bev.yml:/docker-ros/ws/install/image_reprojection/share/image_reprojection/config/params.yml
+  #     - ./gstreamer:/gstreamer
 
-  image-reprojection.planar-bev.static-tf-broadcaster:
-    image: rwthika/ros2:jazzy-desktop-full
-    command:
-      - /bin/bash
-      - -c
-      - >
-        ros2 run tf2_ros static_transform_publisher --frame-id base_link --child-frame-id bev --z 100.0 --pitch 1.5758 --yaw 1.5758 --y 1.0 &
-        ros2 run tf2_ros static_transform_publisher --frame-id bev --child-frame-id bev_optical --roll -1.5758 --yaw -1.5758
+  # image-reprojection.planar-bev.static-tf-broadcaster:
+  #   image: rwthika/ros2:jazzy-desktop-full
+  #   command:
+  #     - /bin/bash
+  #     - -c
+  #     - >
+  #       ros2 run tf2_ros static_transform_publisher --frame-id base_link --child-frame-id bev --z 100.0 --pitch 1.5758 --yaw 1.5758 --y 1.0 &
+  #       ros2 run tf2_ros static_transform_publisher --frame-id bev --child-frame-id bev_optical --roll -1.5758 --yaw -1.5758
 
   rosbag-play:
     image: rwthika/ros2:jazzy-desktop-full
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
-    command: ros2 bag play --loop --delay 3 --playback-duration 33 /data/rosbag
+    command: ros2 bag play --loop --delay 3 /data/rosbag
     volumes:
       - ./data/rosbag:/data/rosbag:ro
 

@@ -22,8 +22,8 @@
       projection:
         planar:
           enabled: true
-          image_topic: ~/planar120/image
-          camera_info_topic: ~/planar120/camera_info
+          image_topic: /image_reprojection/planar120/image
+          camera_info_topic: /image_reprojection/planar120/camera_info
           optical_frame_id: front_center_left_camera_optical_frame
           width: 2560
           height: 590

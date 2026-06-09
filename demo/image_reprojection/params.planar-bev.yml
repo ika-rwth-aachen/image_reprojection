@@ -42,8 +42,8 @@
       projection:
         planar:
           enabled: true
-          image_topic: ~/planar_bev/image
-          camera_info_topic: ~/planar_bev/camera_info
+          image_topic: /image_reprojection/planar_bev/image
+          camera_info_topic: /image_reprojection/planar_bev/camera_info
           optical_frame_id: bev_optical
           width: 1920
           height: 960

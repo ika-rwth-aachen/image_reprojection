@@ -44,8 +44,8 @@
           enabled: false
         equirectangular:
           enabled: true
-          image_topic: ~/equirectangular360/image
-          camera_info_topic: ~/equirectangular360/camera_info
+          image_topic: /image_reprojection/equirectangular360/image
+          camera_info_topic: /image_reprojection/equirectangular360/camera_info
           optical_frame_id: front_center_left_camera_optical_frame
           width: 2560
           height: 640
