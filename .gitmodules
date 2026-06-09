@@ -1,6 +1,3 @@
-[submodule ".devcontainer"]
-	path = .devcontainer
-	url = https://gitlab.ika.rwth-aachen.de/fb-fi/dev-environment/devcontainer.git
-[submodule ".vscode"]
-	path = .vscode
-	url = https://gitlab.ika.rwth-aachen.de/fb-fi/dev-environment/vscode.git
+[submodule ".openads-dev-environment"]
+	path = .openads-dev-environment
+	url = https://github.com/openads-project/openads-dev-environment.git

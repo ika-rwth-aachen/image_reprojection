@@ -1,10 +1,17 @@
-include:
-  - remote: https://raw.githubusercontent.com/ika-rwth-aachen/docker-ros/main/.gitlab-ci/docker-ros.yml
+stages:
+  - docker-ros
 
-variables:
-  PLATFORM: amd64,arm64
-  TARGET: dev,run
-  BASE_IMAGE: rwthika/ros2-cuda:jazzy-ros-base
-  COMMAND: ros2 launch image_reprojection image_reprojection_launch.py
-  RMW_IMPLEMENTATION: rmw_zenoh_cpp
-  ENABLE_SLIM: false
+docker-ros:
+  stage: docker-ros
+  trigger:
+    include:
+      - remote: https://raw.githubusercontent.com/ika-rwth-aachen/docker-ros/main/.gitlab-ci/docker-ros.yml
+    strategy: depend
+  variables:
+    PLATFORM: amd64,arm64
+    TARGET: dev,run
+    BASE_IMAGE: rwthika/ros2-cuda:jazzy-ros-base
+    RMW_IMPLEMENTATION: rmw_zenoh_cpp
+    COMMAND: ros2 launch image_reprojection image_reprojection_launch.py
+    ENABLE_INDUSTRIAL_CI: 'false'
+    TARGET_CMAKE_ARGS: '-DCMAKE_EXPORT_COMPILE_COMMANDS=1'

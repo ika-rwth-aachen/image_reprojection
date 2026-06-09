@@ -1,0 +1,43 @@
+cff-version: 1.2.0
+message: "We hope that our tools can help your research. If this is the case, please cite it using the following metadata."
+
+title: image_reprojection
+type: software
+repository-code: "https://github.com/ika-rwth-aachen/image_reprojection"
+date-released: 2026-06-30
+authors:
+  - given-names: Lennart
+    family-names: Reiher
+
+preferred-citation:
+  title: "Digital Triplet for Developing Future Reliable 6G Cooperative Intelligent Transport Systems: Case Studies from Teleoperation to Platooning"
+  type: article
+  journal:
+    name: IEEE Access
+  year: 2026
+  # doi: TODO
+  authors:
+    - given-names: Hendrik
+      family-names: Schippers
+      orcid: "https://orcid.org/0000-0003-2584-7104"
+    - given-names: Niklas A.
+      family-names: Wagner
+      orcid: "https://orcid.org/0009-0002-4967-1502"
+    - given-names: Lennart
+      family-names: Reiher
+      orcid: "https://orcid.org/0000-0002-7309-164X"
+    - given-names: Harun
+      family-names: Teper
+      orcid: "https://orcid.org/0000-0003-2873-9096"
+    - given-names: Lukas
+      family-names: Ostendorf
+      orcid: "https://orcid.org/0009-0006-8076-1425"
+    - given-names: Jian-Jia
+      family-names: Chen
+      orcid: "https://orcid.org/0000-0001-8114-9760"
+    - given-names: Lutz
+      family-names: Eckstein
+      orcid: "https://orcid.org/0000-0002-2586-7511"
+    - given-names: Christian
+      family-names: Wietfeld
+      orcid: "https://orcid.org/0000-0001-7653-2589"

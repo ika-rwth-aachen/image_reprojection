@@ -4,6 +4,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -24,7 +25,7 @@ namespace image_reprojection {
 
 class ImageReprojection : public rclcpp::Node {
  public:
-  explicit ImageReprojection(const rclcpp::NodeOptions &options);
+  explicit ImageReprojection(const rclcpp::NodeOptions& options);
 
  private:
   struct InputCameraConfig {
@@ -73,42 +74,44 @@ class ImageReprojection : public rclcpp::Node {
   // No message_filters bundles; subscribe separately to images and camera infos
 
   void loadParameters();
+  void setupParameterCallback();
   void setupTopics();
   void configurePlanarCameraInfo();
   void configureEquirectCameraInfo();
-  void imageCallback(size_t index, const Image::ConstSharedPtr &image);
-  void cameraInfoCallback(size_t index, const CameraInfo::ConstSharedPtr &info);
-  void cleanupAccumulators(const rclcpp::Time &current_stamp);
-  void processFrame(int64_t frame_key,
-                    FrameAccumulator &frame,
-                    const std::vector<bool> &camera_mask);
-  void processLeadCameraImage(size_t index,
-                              const rclcpp::Time &stamp,
-                              const rclcpp::Time &arrival_time,
-                              BgrImage &&image);
+  void applyPlanarProjectionConfig(int width, int height, double depth, double fov_x_deg, double blend_factor);
+  void applyEquirectProjectionConfig(int width, int height, double radius, double fov_x_deg, double blend_factor);
+  void rebuildPlanarWarpCaches();
+  void rebuildEquirectWarpCaches();
+  void imageCallback(size_t index, const Image::ConstSharedPtr& image);
+  void cameraInfoCallback(size_t index, const CameraInfo::ConstSharedPtr& info);
+  void cleanupAccumulators(const rclcpp::Time& current_stamp);
+  void processFrame(int64_t frame_key, FrameAccumulator& frame, const std::vector<bool>& camera_mask);
+  void processLeadCameraImage(size_t index, const rclcpp::Time& stamp, const rclcpp::Time& arrival_time, BgrImage&& image);
   void exportGstConfigIfReady();
   void markGstConfigDirty();
 
-  bool lookupCameraTransforms(const rclcpp::Time &stamp,
-                              const std::vector<std::string> &camera_frames,
-                              const std::string &target_frame,
-                              std::vector<tf2::Transform> &transforms,
+  bool lookupCameraTransforms(const rclcpp::Time& stamp,
+                              const std::vector<std::string>& camera_frames,
+                              const std::string& target_frame,
+                              std::vector<tf2::Transform>& transforms,
                               bool planar_projection,
-                              const std::vector<bool> *camera_mask = nullptr);
+                              const std::vector<bool>* camera_mask = nullptr);
 
-  static bool toBgrImage(const Image::ConstSharedPtr &msg, BgrImage &output, const rclcpp::Logger &logger);
-  static bool extractIntrinsics(const CameraInfo::ConstSharedPtr &info, CameraIntrinsics &intrinsics, const rclcpp::Logger &logger);
-  bool reprojectPlanar(const std::vector<BgrImage> &input_images,
-                       const std::vector<CameraIntrinsics> &intrinsics,
-                       const std::vector<tf2::Transform> &transforms,
-                       const std::vector<bool> *camera_mask,
-                       sensor_msgs::msg::Image &output_image) const;
-  bool reprojectEquirectangular(const std::vector<BgrImage> &input_images,
-                                const std::vector<CameraIntrinsics> &intrinsics,
-                                const std::vector<tf2::Transform> &transforms,
-                                const std::vector<bool> *camera_mask,
-                                sensor_msgs::msg::Image &output_image) const;
-  static std::array<float, 3> bilinearSample(const BgrImage &image, double u, double v);
+  static bool toBgrImage(const Image::ConstSharedPtr& msg, BgrImage& output, const rclcpp::Logger& logger);
+  static bool extractIntrinsics(const CameraInfo::ConstSharedPtr& info,
+                                CameraIntrinsics& intrinsics,
+                                const rclcpp::Logger& logger);
+  bool reprojectPlanar(const std::vector<BgrImage>& input_images,
+                       const std::vector<CameraIntrinsics>& intrinsics,
+                       const std::vector<tf2::Transform>& transforms,
+                       const std::vector<bool>* camera_mask,
+                       sensor_msgs::msg::Image& output_image) const;
+  bool reprojectEquirectangular(const std::vector<BgrImage>& input_images,
+                                const std::vector<CameraIntrinsics>& intrinsics,
+                                const std::vector<tf2::Transform>& transforms,
+                                const std::vector<bool>* camera_mask,
+                                sensor_msgs::msg::Image& output_image) const;
+  static std::array<float, 3> bilinearSample(const BgrImage& image, double u, double v);
   void updatePlanarWarpCache(size_t index);
   void updateEquirectWarpCache(size_t index);
   void preparePlanarScratchBuffers(size_t camera_count) const;
@@ -130,6 +133,7 @@ class ImageReprojection : public rclcpp::Node {
   double planar_cx_{0.0};
   double planar_cy_{0.0};
   double planar_depth_{1.0};
+  double planar_fov_x_deg_{90.0};
   double planar_blend_factor_{1.0};
   std::string planar_frame_id_{};
 
@@ -139,6 +143,7 @@ class ImageReprojection : public rclcpp::Node {
   int equirect_height_{0};
   double equirect_hfov_rad_{0.0};
   double equirect_vfov_rad_{0.0};
+  double equirect_fov_x_deg_{360.0};
   double equirect_blend_factor_{1.0};
   std::string equirect_frame_id_{};
   double equirect_radius_{1.0};
@@ -198,6 +203,8 @@ class ImageReprojection : public rclcpp::Node {
 
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_{};
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_{};
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr parameter_callback_handle_{};
+  mutable std::mutex state_mutex_{};
 };
 
 }  // namespace image_reprojection

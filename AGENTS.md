@@ -1,128 +1,253 @@
-# image_reprojection — Agent Notes
+# image_reprojection - Agent Notes
 
-This package provides a ROS 2 C++ component node that stitches multiple camera images into one or more virtual outputs by reprojection. Two projection modes are supported and can be enabled independently:
+This repository contains image reprojection and stitching tools for ROS 2 and
+GStreamer. The ROS 2 package ingests multiple calibrated camera streams and
+publishes one or more virtual stitched outputs. The GStreamer plugin consumes a
+JSON configuration exported by the ROS 2 node and applies the same reprojection
+logic to raw BGR video streams.
 
-- Planar pinhole mosaic (projection onto a plane at finite depth)
-- Equirectangular panorama (spherical, lat/long mapping)
+Supported projection modes:
 
-The node is optimized for static CameraInfo and TF: intrinsics, direction tables, and transforms are cached; only images are synchronized by timestamp tolerance.
+- Planar pinhole mosaic: projection onto a plane at finite depth.
+- Equirectangular panorama: spherical lat/lon mapping.
 
-## Layout
+Both projection modes can be enabled independently.
 
-- image_reprojection/include/image_reprojection/image_reprojection.hpp — node interface and state
-- image_reprojection/src/image_reprojection.cpp — implementation (subs, aggregation, reprojection, blending)
-- image_reprojection/config/params.yml — example params (new structure)
-- image_reprojection/CMakeLists.txt, package.xml — build metadata
+## Repository Layout
 
-Build (from workspace root at /docker-ros/ws):
+- `README.md` - top-level project overview.
+- `image_reprojection/` - ROS 2 C++ component package and executable.
+- `image_reprojection/include/image_reprojection/image_reprojection.hpp` - ROS node interface and state.
+- `image_reprojection/src/image_reprojection.cpp` - subscriptions, synchronization,
+  reprojection, blending, TF caching, and JSON export.
+- `image_reprojection/config/params.yml` - example ROS parameters.
+- `image_reprojection/launch/image_reprojection_launch.py` - launch file for the ROS node.
+- `gst_image_reprojection/` - standalone GStreamer plugin.
+- `gst_image_reprojection/src/gstimagereprojection.c` - GStreamer element implementation.
+- `docker/` - development container dependency hooks.
 
-- colcon build --packages-select image_reprojection
-- source install/setup.bash
+## Build and Run
 
-Run:
+From the ROS workspace root:
 
-- ros2 run image_reprojection image_reprojection --ros-args --params-file PATH/TO/params.yml
+```bash
+colcon build --packages-select image_reprojection
+source install/setup.bash
+ros2 run image_reprojection image_reprojection --ros-args --params-file PATH/TO/params.yml
+```
 
-## Subscriptions and Aggregation
+The repository-level development build in the README uses:
 
-- One Image subscription per input topic (SensorDataQoS)
-- One CameraInfo subscription per input (reliable QoS)
-- CameraInfo is latched (treated as static). Images are ignored until the corresponding CameraInfo is seen once.
-- Images are grouped into buckets keyed by stamp (nanoseconds) with tolerance `params.frame_time_tolerance`. A bucket that has all N cameras is processed once; old partial buckets are dropped after `params.frame_timeout`.
+```bash
+colcon build
+colcon test
+colcon test-result --verbose
+```
+
+The GStreamer plugin is built separately with CMake from `gst_image_reprojection/`.
+See `gst_image_reprojection/README.md` for the install path and example pipeline.
+
+## ROS Node Behavior
+
+- One `image_transport` image subscription per input topic.
+- One reliable `sensor_msgs/msg/CameraInfo` subscription per input.
+- Input image transport is configured with `input.<IMAGE_TOPIC>.image_transport`
+  and defaults to `raw`.
+- CameraInfo is treated as static. Images are ignored until the corresponding
+  CameraInfo has been received.
+- Camera intrinsics and frame IDs are latched from CameraInfo.
+- Output images are published as BGR8 through `image_transport`; output
+  CameraInfo is published through regular ROS publishers.
+
+## Synchronization Modes
+
+`params.sync_mode` controls how input frames are assembled:
+
+- `wait_all` (aliases: `all`, `sync`) groups images into timestamp buckets and
+  processes a bucket once all configured cameras are present within
+  `params.frame_time_tolerance`.
+- `lead_latest` (aliases: `lead`, `lead_image`) processes whenever camera 0
+  arrives, using the latest available images from the other cameras if their
+  stamps are within tolerance.
+
+Old partial `wait_all` buckets are removed after `params.frame_timeout`.
 
 ## Transforms and Caching
 
-- Assumes transforms camera→target frame are static.
-- On first CameraInfo for a camera, the node tries to cache TF at time 0 for both projections’ target frames. If unavailable, it falls back to stamped lookup during processing.
-- Set `params.recompute_every_frame: true` to force stamped TF lookups every frame (dynamic rigs), otherwise cached transforms are reused.
+- Transforms are looked up from each input camera frame to each projection target frame.
+- Empty projection target frames default to the first usable input camera frame.
+- By default, TF is treated as static. The node looks up time 0 transforms,
+  caches them, and precomputes per-camera warp maps.
+- If a static transform is not ready when CameraInfo arrives, lookup is retried during frame processing.
+- Set `params.recompute_every_frame: true` for dynamic rigs. This disables
+  warp-map reuse and performs stamped TF lookups for each processed frame.
 
-## Projections
+## Projection and Blending
 
-Both projections use the same accumulation + blending strategy: each output pixel gathers bilinearly sampled colors from all cameras that see it and keeps a per-camera weight. The final pixel is
+For each output pixel, every camera that sees the target ray contributes a
+bilinearly sampled BGR color and a per-camera weight. The final pixel is:
 
+```text
+blended = (1 - blend_factor) * dominant + blend_factor * weighted_average
 ```
-blended = (1 − blend_factor) * dominant + blend_factor * weighted_average
+
+`dominant` is the color from the camera with the largest weight at that pixel.
+`weighted_average` is normalized by total weight.
+
+### Planar Pinhole Mosaic
+
+- Target frame: `output.projection.planar.optical_frame_id`; defaults to the
+  first usable input frame if empty.
+- Output size: `width`, `height`.
+- Horizontal FOV: `fov_x` in degrees, clamped to `[1, 179]`.
+- Square pixels are assumed:
+  - `fx = fy = (width / 2) / tan(fov_x / 2)`
+  - `cx = width / 2`
+  - `cy = height / 2`
+- Projection plane: `depth` meters along `+Z` in the target frame.
+- Blending: `blend_factor` clamped to `[0, 1]`.
+- Output CameraInfo uses `distortion_model = "plumb_bob"` and the computed
+  pinhole intrinsics.
+- Static precompute includes per-column `x_norm`, per-row `y_norm`, and
+  per-camera warp maps when cached TF is available.
+
+### Equirectangular Panorama
+
+- Target frame: `output.projection.equirectangular.optical_frame_id`; defaults
+  to the first usable input frame if empty.
+- Output size: `width`, `height`.
+- Horizontal FOV: `fov_x` in degrees, clamped to `[1, 360]`.
+- Vertical FOV is inferred linearly:
+  - `vfov = hfov * (height / width)`, clamped to `(0, pi]`.
+- Sampling sphere: `radius` meters along ray directions.
+- Blending: `blend_factor` clamped to `[0, 1]`.
+- Output CameraInfo uses `distortion_model = "equirectangular"`.
+- `K[0,0]` stores horizontal FOV in radians and `K[1,1]` stores vertical FOV
+  in radians for consumers.
+- Static precompute includes sin/cos tables for latitude and longitude plus
+  per-camera warp maps when cached TF is available.
+
+## Parameters
+
+Use `image_reprojection/config/params.yml` as the reference structure.
+
+```yaml
+input:
+  image_topics: [<image_topic>, ...]
+  <image_topic>:
+    image_transport: raw
+    camera_info_topic: <camera_info_topic>
+
+output:
+  projection:
+    planar:
+      enabled: true
+      image_topic: <planar_image_topic>
+      camera_info_topic: <planar_camera_info_topic>
+      optical_frame_id: <target_frame_or_empty>
+      width: 1280
+      height: 720
+      depth: 1.0
+      fov_x: 90.0
+      blend_factor: 1.0
+    equirectangular:
+      enabled: false
+      image_topic: <equirectangular_image_topic>
+      camera_info_topic: <equirectangular_camera_info_topic>
+      optical_frame_id: <target_frame_or_empty>
+      width: 2048
+      height: 1024
+      radius: 1.0
+      fov_x: 360.0
+      blend_factor: 1.0
+  gstreamer:
+    config_export_path: ""
+
+params:
+  sync_mode: wait_all
+  transform_timeout: 0.05
+  frame_timeout: 1.0
+  frame_time_tolerance: 0.005
+  recompute_every_frame: false
 ```
 
-where dominant is the color from the camera with the largest weight at that pixel; weighted_average normalizes by total weight.
+At least one projection must be enabled.
 
-### Planar pinhole mosaic
+## Image Formats
 
-- Target frame: `output.projection.planar.optical_frame_id` (defaults to first camera if empty)
-- Output size: `width`, `height`
-- FOV: `fov_x` (deg). Square pixels assumed; intrinsics computed as
-  - fx = fy = (width/2) / tan(fov_x/2), cx = width/2, cy = height/2
-- Depth: `depth` (meters) — distance of the projection plane along +Z in the target frame
-- Blending: `blend_factor` in [0,1]
-- CameraInfo: plumb_bob; K/P filled from computed intrinsics
-- Precompute: per-column x_norm, per-row y_norm once
+The ROS node decodes images manually without `cv_bridge`.
 
-### Equirectangular panorama
+Supported input encodings:
 
-- Target frame: `output.projection.equirectangular.optical_frame_id` (defaults to first camera if empty)
-- Output size: `width`, `height`
-- Horizontal FOV: `fov_x` (deg). Vertical is inferred linearly to avoid stretching:
-  - vfov = hfov * (height/width), clamped to (0, π]
-- Radius: `radius` (meters) — sampling sphere radius along ray directions
-- Blending: `blend_factor` in [0,1]
-- CameraInfo: `distortion_model = "equirectangular"`; K(0,0) stores hfov (rad), K(1,1) stores vfov (rad) for consumers
-- Precompute: sin/cos(lat) per row and sin/cos(lon) per column once
+- `bgr8`
+- `rgb8`
+- `bgra8`
+- `rgba8`
+- `mono8`
 
-## Parameters (new structure)
+Input row stride is respected. Each accepted image is copied or converted into a
+contiguous BGR8 buffer for reprojection and bilinear sampling.
 
-See config/params.yml for a working example.
+The GStreamer plugin currently accepts and produces raw BGR video caps.
 
-- input:
-  - image_topics: [<image_topic> ...]
-  - <image_topic>:
-    - camera_info_topic: <string>
+## GStreamer Config Export
 
-- output:
-  - projection:
-    - planar:
-      - enabled: bool
-      - image_topic: string
-      - camera_info_topic: string
-      - optical_frame_id: string (defaults to first camera)
-      - width: int, height: int
-      - depth: double (meters)
-      - fov_x: double (deg)
-      - blend_factor: double in [0,1]
-    - equirectangular:
-      - enabled: bool
-      - image_topic: string
-      - camera_info_topic: string
-      - optical_frame_id: string (defaults to first camera)
-      - width: int, height: int
-      - radius: double (meters)
-      - fov_x: double (deg); vfov inferred by aspect
-      - blend_factor: double in [0,1]
+`output.gstreamer.config_export_path` enables JSON export from the ROS node. The
+export is written once all CameraInfo data and required cached transforms are
+available. It includes:
 
-- params:
-  - sync_queue_size: int (internal buffering for image buckets)
-  - transform_timeout: double (s) TF lookup timeout
-  - frame_timeout: double (s) — drop old partial buckets
-  - frame_time_tolerance: double (s) — max skew when grouping images
-  - recompute_every_frame: bool (default false) — redo TF lookups each frame
+- camera count and per-camera intrinsics;
+- input image and CameraInfo topic names;
+- input frame IDs;
+- planar and equirectangular transform matrices;
+- enabled projection metadata, dimensions, FOV/intrinsics, depth or radius, and
+  blend factor.
 
-## Image formats
+The GStreamer element `imagereprojection` uses this file through its `config-path`
+property. Its `projection-mode` property accepts `auto`, `planar`, and
+`equirectangular`; `auto` prefers planar when enabled.
 
-Manual decoding (no cv_bridge dependency): BGR8, RGB8, BGRA8, RGBA8, MONO8. Stride is respected; rows are copied/converted into a contiguous BGR8 buffer for reprojection and sampling.
+## Logging and Timing
 
-## Logging & Timing
+The ROS node logs:
 
-- Partial frame readiness (x/y)
-- Per‑projection processing times (ms)
-- Success/failure per projection and overall frame publish status
+- startup projection and sync mode summary;
+- subscription setup;
+- ignored images before CameraInfo is ready;
+- partial frame readiness in debug logs;
+- missing TF or projection failures;
+- per-frame publish summaries with sync wait, transform lookup, projection time,
+  total processing latency, and cameras used.
 
 ## Dependencies
 
-- always keep package.xml and CMakeLists.txt up-to-date
-- rclcpp, rclcpp_components, sensor_msgs, tf2, tf2_ros, tf2_geometry_msgs
-- message_filters is still listed in CMake but not used by the current implementation (safe to remove if desired)
+Keep dependency declarations synchronized with source changes.
 
-## Tips for extending
+ROS package dependencies currently include:
 
-- Add new projection modes by following the pattern: per‑projection parameters, precompute direction fields, reproject method, publishers, and CameraInfo.
-- For dynamic rigs, prefer `recompute_every_frame: true` and consider throttling or GPU offload if performance is tight.
-- Keep precompute + cached TF to minimize per‑frame cost.
+- `ament_cmake`
+- `image_transport`
+- `rclcpp`
+- `rclcpp_components`
+- `sensor_msgs`
+- `tf2`
+- `tf2_geometry_msgs`
+- `tf2_ros`
+
+Runtime dependency:
+
+- `image_transport_plugins`
+
+The GStreamer plugin depends on GStreamer, GStreamer Base/Video, JSON-GLib, and
+`libm`.
+
+## Tips for Extending
+
+- Add projection modes by following the existing pattern: parameters, output
+  publishers, CameraInfo setup, direction/precompute tables, TF lookup/cache
+  handling, reprojection method, and optional GStreamer config fields.
+- Keep cached precompute paths and `recompute_every_frame` behavior aligned.
+- Update both `package.xml` and `CMakeLists.txt` when adding or removing ROS dependencies.
+- Update the GStreamer plugin and JSON export together when changing the exported schema.
+- Prefer focused tests or reproducible launch/config examples when changing
+  synchronization, TF behavior, projection geometry, or image format handling.
