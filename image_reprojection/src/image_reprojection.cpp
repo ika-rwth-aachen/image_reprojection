@@ -163,17 +163,16 @@ ImageReprojection::ImageReprojection(const rclcpp::NodeOptions& options) : rclcp
               "Projections: %s (%s). Sync mode: %s",
               input_configs_.size(), projection_list.c_str(), frame_info.empty() ? "n/a" : frame_info.c_str(), sync_mode_str);
 
-  setupParameterCallback();
-
   // run setup after constructor has finished to enable shared_from_this()
   setup_timer_ = this->create_wall_timer(std::chrono::milliseconds(1), [this]() {
     setupTopics();
+    setupParameterCallback();
     setup_timer_->cancel();
   });
 }
 
 void ImageReprojection::loadParameters() {
-  auto read_only_descriptor = [](const std::string& description) {
+  auto fixed_descriptor = [](const std::string& description) {
     rcl_interfaces::msg::ParameterDescriptor descriptor;
     descriptor.description = description;
     descriptor.read_only = true;
@@ -186,7 +185,7 @@ void ImageReprojection::loadParameters() {
     return descriptor;
   };
 
-  const auto read_only = read_only_descriptor("Configured at startup. Restart the node to change this parameter.");
+  const auto fixed = fixed_descriptor("Configured at startup. Restart the node to change this parameter.");
   const auto dynamic = dynamic_descriptor("May be changed at runtime with ros2 param set.");
 
   accumulator_timeout_sec_ = this->declare_parameter<double>("params.frame_timeout", kDefaultAccumulatorTimeoutSec, dynamic);
@@ -207,7 +206,7 @@ void ImageReprojection::loadParameters() {
     frame_time_tolerance_sec_ = 0.0;
   }
 
-  gst_config_export_path_ = this->declare_parameter<std::string>("output.gstreamer.config_export_path", "", read_only);
+  gst_config_export_path_ = this->declare_parameter<std::string>("output.gstreamer.config_export_path", "", fixed);
   if (!gst_config_export_path_.empty()) {
     gst_config_dirty_ = true;
   }
@@ -221,18 +220,18 @@ void ImageReprojection::loadParameters() {
     throw std::runtime_error("Unsupported params.sync_mode value: '" + sync_mode + "'");
   }
 
-  enable_planar_ = this->declare_parameter<bool>("output.projection.planar.enabled", true, read_only);
-  enable_equirectangular_ = this->declare_parameter<bool>("output.projection.equirectangular.enabled", false, read_only);
+  enable_planar_ = this->declare_parameter<bool>("output.projection.planar.enabled", true, fixed);
+  enable_equirectangular_ = this->declare_parameter<bool>("output.projection.equirectangular.enabled", false, fixed);
 
   if (!enable_planar_ && !enable_equirectangular_) {
     throw std::runtime_error("At least one projection (planar or equirectangular) must be enabled");
   }
 
   planar_image_topic_ =
-      this->declare_parameter<std::string>("output.projection.planar.image_topic", "~/output/planar/image", read_only);
-  planar_info_topic_ = this->declare_parameter<std::string>("output.projection.planar.camera_info_topic",
-                                                            "~/output/planar/camera_info", read_only);
-  planar_frame_id_ = this->declare_parameter<std::string>("output.projection.planar.optical_frame_id", "", read_only);
+      this->declare_parameter<std::string>("output.projection.planar.image_topic", "~/output/planar/image", fixed);
+  planar_info_topic_ =
+      this->declare_parameter<std::string>("output.projection.planar.camera_info_topic", "~/output/planar/camera_info", fixed);
+  planar_frame_id_ = this->declare_parameter<std::string>("output.projection.planar.optical_frame_id", "", fixed);
   const int planar_width = this->declare_parameter<int>("output.projection.planar.width", 1280, dynamic);
   const int planar_height = this->declare_parameter<int>("output.projection.planar.height", 720, dynamic);
   const double planar_depth = this->declare_parameter<double>("output.projection.planar.depth", 1.0, dynamic);
@@ -250,10 +249,10 @@ void ImageReprojection::loadParameters() {
   applyPlanarProjectionConfig(planar_width, planar_height, planar_depth, planar_fov_x_deg, planar_blend_factor);
 
   equirect_image_topic_ = this->declare_parameter<std::string>("output.projection.equirectangular.image_topic",
-                                                               "~/output/equirectangular/image", read_only);
+                                                               "~/output/equirectangular/image", fixed);
   equirect_info_topic_ = this->declare_parameter<std::string>("output.projection.equirectangular.camera_info_topic",
-                                                              "~/output/equirectangular/camera_info", read_only);
-  equirect_frame_id_ = this->declare_parameter<std::string>("output.projection.equirectangular.optical_frame_id", "", read_only);
+                                                              "~/output/equirectangular/camera_info", fixed);
+  equirect_frame_id_ = this->declare_parameter<std::string>("output.projection.equirectangular.optical_frame_id", "", fixed);
   const int equirect_width = this->declare_parameter<int>("output.projection.equirectangular.width", 2048, dynamic);
   const int equirect_height = this->declare_parameter<int>("output.projection.equirectangular.height", 1024, dynamic);
   const double equirect_radius =
@@ -277,7 +276,7 @@ void ImageReprojection::loadParameters() {
   recompute_every_frame_ = this->declare_parameter<bool>("params.recompute_every_frame", false, dynamic);
 
   const auto image_topics =
-      this->declare_parameter<std::vector<std::string>>("input.image_topics", std::vector<std::string>{}, read_only);
+      this->declare_parameter<std::vector<std::string>>("input.image_topics", std::vector<std::string>{}, fixed);
   if (image_topics.empty()) {
     throw std::runtime_error("input.image_topics must contain at least one topic");
   }
@@ -295,7 +294,7 @@ void ImageReprojection::loadParameters() {
     if (this->has_parameter(camera_info_param)) {
       config.camera_info_topic = this->get_parameter(camera_info_param).as_string();
     } else {
-      config.camera_info_topic = this->declare_parameter<std::string>(camera_info_param, "", read_only);
+      config.camera_info_topic = this->declare_parameter<std::string>(camera_info_param, "", fixed);
     }
 
     if (config.camera_info_topic.empty()) {
