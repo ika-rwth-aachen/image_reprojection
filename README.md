@@ -26,16 +26,17 @@ The [image_reprojection](./image_reprojection/README.md) node reprojects an arbi
 
 ## 🚀 Quick Start
 
-**TODO: Teaser GIF**
+![Teaser Image](assets/teaser.gif)
 
-1. Launch the [`demo/docker-compose.yml`](./demo/docker-compose.yml) setup. This will play a ROS 2 bag containing multiple camera feeds, launch the image reprojection node, and visualizate both planar and equirectangular projections in RViz.
+1. Launch the [`demo/docker-compose.yml`](./demo/docker-compose.yml) setup. This will play a ROS 2 bag containing multiple camera feeds, launch two image reprojection nodes, and visualize input and outputs images in RViz.
     ```bash
     cd demo
     xhost +local: # allow GUI forwarding from containers
     docker compose up -d
     ```
-2. In the RQt window that has also been opened, modify the reprojection parameters (e.g., `output.projection.planar.fov_x` or `output.projection.equirectangular.radius`) and see the effect in RViz.
-3. Stop the demo and clean up.
+2. Check out the planar and equirectangular reprojection outputs in RViz, alongside the original eight input camera feeds.
+3. In the RQt window that has also been opened, modify the reprojection parameters (e.g., `output.projection.planar.fov_x` or `output.projection.equirectangular.radius`) and see the effect in RViz. You may need to hit *Refresh* to see the two image reprojection nodes in the parameter editor.
+4. Stop the demo and clean up.
     ```bash
     docker compose down
     xhost -local: # revoke GUI forwarding permissions
