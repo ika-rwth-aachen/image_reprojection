@@ -36,12 +36,10 @@ services:
   #       ros2 run tf2_ros static_transform_publisher --frame-id bev --child-frame-id bev_optical --roll -1.5758 --yaw -1.5758
 
   rosbag-play:
-    image: rwthika/ros2:jazzy-desktop-full
+    image: ghcr.io/ika-rwth-aachen/image_reprojection:demo-rosbag
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
     command: ros2 bag play --loop --delay 3 /data/rosbag
-    volumes:
-      - ./data/rosbag:/data/rosbag:ro
 
   rviz:
     image: rwthika/ros2-cuda:jazzy-desktop-full
