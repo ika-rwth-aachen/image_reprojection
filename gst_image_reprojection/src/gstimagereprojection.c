@@ -1,3 +1,6 @@
+// Copyright Institute for Automotive Engineering (ika), RWTH Aachen University
+// SPDX-License-Identifier: Apache-2.0
+ 
 #include <gst/base/gstaggregator.h>
 #include <gst/gst.h>
 #include <gst/video/video.h>
