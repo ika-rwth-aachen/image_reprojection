@@ -15,7 +15,7 @@ preferred-citation:
   journal:
     name: IEEE Access
   year: 2026
-  # doi: TODO
+  doi: 10.1109/ACCESS.2026.3702246
   authors:
     - given-names: Hendrik
       family-names: Schippers
