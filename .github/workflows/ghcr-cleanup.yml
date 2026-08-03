@@ -1,0 +1,11 @@
+name: ghcr-cleanup
+
+on:
+  schedule:
+    - cron: "0 0 * * *" # every day at 00:00
+  workflow_dispatch:
+
+jobs:
+  ghcr-cleanup:
+    uses: openads-project/openads-dev-environment/.github/workflows/ghcr-cleanup.yml@main
+    secrets: inherit
