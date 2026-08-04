@@ -1,0 +1,17 @@
+name: helm-oci
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  helm-oci:
+    uses: openads-project/openads-dev-environment/.github/workflows/helm-oci.yml@main
+    secrets: inherit

@@ -1,0 +1,24 @@
+services:
+
+  image-reprojection:
+    image: ghcr.io/ika-rwth-aachen/image_reprojection:v1.1.0
+    environment:
+      # --- name ------
+      NAMESPACE: /
+      NAME: image_reprojection
+      # --- other -----
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      USE_SIM_TIME: ${USE_SIM_TIME:-false}
+      PARAMS: ${PARAMS:-/docker-ros/ws/install/image_reprojection/share/image_reprojection/config/params.yml}
+    command:
+      - /bin/bash
+      - -ic
+      - |
+        ros2 launch image_reprojection image_reprojection_launch.py \
+          namespace:=$${NAMESPACE} \
+          name:=$${NAME} \
+          log_level:=$${LOG_LEVEL} \
+          use_sim_time:=$${USE_SIM_TIME} \
+          params:=$${PARAMS}
+    # volumes:
+    #   - ./params.yml:/docker-ros/ws/install/image_reprojection/share/image_reprojection/config/params.yml
