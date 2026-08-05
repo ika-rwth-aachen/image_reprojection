@@ -1401,7 +1401,7 @@ GST_PLUGIN_DEFINE(GST_VERSION_MAJOR,
                   imagereprojection,
                   "Image Reprojection",
                   gst_image_reprojection_plugin_init,
-                  "1.1.0",
+                  "1.1.1",
                   "Apache-2.0",
                   "gst_image_reprojection",
                   "https://github.com/ika-rwth-aachen/image_reprojection")

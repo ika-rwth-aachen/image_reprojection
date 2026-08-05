@@ -1,7 +1,7 @@
 services:
 
   image-reprojection:
-    image: ghcr.io/ika-rwth-aachen/image_reprojection:v1.1.0
+    image: ghcr.io/ika-rwth-aachen/image_reprojection:v1.1.1
     environment:
       # --- name ------
       NAMESPACE: /

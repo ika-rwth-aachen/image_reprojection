@@ -3,7 +3,7 @@
 <package format="3">
 
   <name>image_reprojection</name>
-  <version>1.1.0</version>
+  <version>1.1.1</version>
   <description>Reprojects multiple camera images using various projection methods</description>
 
   <maintainer email="lennart.reiher@rwth-aachen.de">Lennart Reiher</maintainer>

@@ -1,7 +1,7 @@
 apiVersion: v2
 name: image-reprojection
-version: 1.1.0
-appVersion: 1.1.0
+version: 1.1.1
+appVersion: 1.1.1
 description: Planar and Equirectangular Image Reprojection/Stitching for ROS 2 and GStreamer
 dependencies:
   - repository: oci://ghcr.io/openads-project/openads-helm
