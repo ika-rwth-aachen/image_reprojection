@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <cstdint>
 #include <limits>
 #include <map>
 #include <memory>
@@ -73,6 +74,11 @@ class ImageReprojection : public rclcpp::Node {
     float v{std::numeric_limits<float>::quiet_NaN()};
   };
 
+  struct DominantPixelMapping {
+    PixelMapping pixel;
+    uint32_t camera{std::numeric_limits<uint32_t>::max()};
+  };
+
   enum class AggregationMode {
     WaitForAll,
     LeadWithLatest,
@@ -91,6 +97,7 @@ class ImageReprojection : public rclcpp::Node {
   void applyEquirectProjectionConfig(int width, int height, double radius, double fov_x_deg, double blend_factor);
   void rebuildPlanarWarpCaches();
   void rebuildEquirectWarpCaches();
+  void rebuildEquirectDominantWarpCache();
   void imageCallback(size_t index, const Image::ConstSharedPtr& image);
   void cameraInfoCallback(size_t index, const CameraInfo::ConstSharedPtr& info);
   void cleanupAccumulators(const rclcpp::Time& current_stamp);
@@ -193,6 +200,8 @@ class ImageReprojection : public rclcpp::Node {
 
   std::vector<std::vector<PixelMapping>> planar_warp_maps_;
   std::vector<std::vector<PixelMapping>> equirect_warp_maps_;
+  std::vector<DominantPixelMapping> equirect_dominant_map_;
+  bool equirect_dominant_map_ready_{false};
   std::vector<bool> planar_warp_ready_;
   std::vector<bool> equirect_warp_ready_;
 

@@ -503,6 +503,7 @@ void ImageReprojection::setupParameterCallback() {
         if (recompute_changed) {
           std::fill(planar_warp_ready_.begin(), planar_warp_ready_.end(), false);
           std::fill(equirect_warp_ready_.begin(), equirect_warp_ready_.end(), false);
+          equirect_dominant_map_ready_ = false;
           if (!recompute_every_frame_) {
             rebuildPlanarWarpCaches();
             rebuildEquirectWarpCaches();
@@ -570,6 +571,7 @@ void ImageReprojection::rebuildEquirectWarpCaches() {
   if (!enable_equirectangular_) {
     return;
   }
+  equirect_dominant_map_ready_ = false;
   equirect_warp_ready_.assign(input_configs_.size(), false);
   if (equirect_warp_maps_.size() != input_configs_.size()) {
     equirect_warp_maps_.resize(input_configs_.size());
@@ -577,6 +579,38 @@ void ImageReprojection::rebuildEquirectWarpCaches() {
   for (size_t i = 0; i < input_configs_.size(); ++i) {
     updateEquirectWarpCache(i);
   }
+}
+
+void ImageReprojection::rebuildEquirectDominantWarpCache() {
+  equirect_dominant_map_ready_ = false;
+  if (recompute_every_frame_ || equirect_blend_factor_ != 0.0 || equirect_width_ <= 0 || equirect_height_ <= 0 ||
+      equirect_warp_maps_.size() != input_configs_.size() || equirect_warp_ready_.size() != input_configs_.size()) {
+    return;
+  }
+
+  const size_t pixel_count = static_cast<size_t>(equirect_width_) * equirect_height_;
+  for (size_t i = 0; i < input_configs_.size(); ++i) {
+    if (!equirect_warp_ready_[i] || equirect_warp_maps_[i].size() != pixel_count) return;
+  }
+
+  equirect_dominant_map_.assign(pixel_count, DominantPixelMapping{});
+  for (size_t camera = 0; camera < input_configs_.size(); ++camera) {
+    const auto& mapping = equirect_warp_maps_[camera];
+    const float max_u = static_cast<float>(static_intrinsics_[camera].width - 1);
+    const float max_v = static_cast<float>(static_intrinsics_[camera].height - 1);
+    for (size_t pixel = 0; pixel < pixel_count; ++pixel) {
+      auto& selected = equirect_dominant_map_[pixel];
+      if (selected.camera != std::numeric_limits<uint32_t>::max()) continue;
+      const auto& entry = mapping[pixel];
+      if (!std::isfinite(entry.u) || !std::isfinite(entry.v) || entry.u < 0.0f || entry.u > max_u || entry.v < 0.0f ||
+          entry.v > max_v) {
+        continue;
+      }
+      selected.pixel = entry;
+      selected.camera = static_cast<uint32_t>(camera);
+    }
+  }
+  equirect_dominant_map_ready_ = true;
 }
 
 void ImageReprojection::setupTopics() {
@@ -614,6 +648,8 @@ void ImageReprojection::setupTopics() {
   equirect_tf_ready_.assign(n, false);
   planar_warp_maps_.assign(n, {});
   equirect_warp_maps_.assign(n, {});
+  equirect_dominant_map_.clear();
+  equirect_dominant_map_ready_ = false;
   planar_warp_ready_.assign(n, false);
   equirect_warp_ready_.assign(n, false);
   planar_accumulators_.assign(n, {});
@@ -1207,6 +1243,9 @@ void ImageReprojection::processFrame(int64_t frame_key, FrameAccumulator& frame,
 
   if (enable_equirectangular_ && equirect_transforms_valid) {
     sensor_msgs::msg::Image equirect_output;
+    if (!equirect_dominant_map_ready_ && !recompute_every_frame_ && equirect_blend_factor_ == 0.0) {
+      rebuildEquirectDominantWarpCache();
+    }
     const auto eq_t0 = this->now();
     equirect_attempted = true;
     const bool eq_ok = reprojectEquirectangular(images, frame.intrinsics, equirect_transforms, mask_ptr, equirect_output);
@@ -1674,6 +1713,7 @@ void ImageReprojection::updateEquirectWarpCache(size_t index) {
   if (index >= input_configs_.size()) {
     return;
   }
+  equirect_dominant_map_ready_ = false;
   equirect_warp_ready_[index] = false;
   if (!intrinsics_ready_[index] || !equirect_tf_ready_[index]) {
     return;
@@ -1843,6 +1883,32 @@ bool ImageReprojection::reprojectEquirectangular(const std::vector<BgrImage>& in
   if (active_count == 0) {
     RCLCPP_WARN(get_logger(), "No active input cameras available for equirectangular reprojection.");
     return false;
+  }
+
+  bool use_dominant_map = equirect_blend_factor_ == 0.0 && !recompute_every_frame_ && equirect_dominant_map_ready_ &&
+                          equirect_dominant_map_.size() == pixel_count && active_count == camera_count;
+  for (size_t i = 0; i < camera_count && use_dominant_map; ++i) {
+    if (input_images[i].width != intrinsics[i].width || input_images[i].height != intrinsics[i].height) {
+      use_dominant_map = false;
+    }
+  }
+  if (use_dominant_map) {
+    output_image.height = static_cast<uint32_t>(height);
+    output_image.width = static_cast<uint32_t>(width);
+    output_image.encoding = sensor_msgs::image_encodings::BGR8;
+    output_image.is_bigendian = false;
+    output_image.step = static_cast<uint32_t>(width * 3);
+    output_image.data.assign(pixel_count * 3, 0);
+    for (size_t pixel = 0; pixel < pixel_count; ++pixel) {
+      const auto& entry = equirect_dominant_map_[pixel];
+      if (entry.camera == std::numeric_limits<uint32_t>::max()) continue;
+      const auto colour = bilinearSample(input_images[entry.camera], entry.pixel.u, entry.pixel.v);
+      const size_t base = pixel * 3;
+      output_image.data[base] = static_cast<uint8_t>(std::clamp(colour[0], 0.0f, 255.0f));
+      output_image.data[base + 1] = static_cast<uint8_t>(std::clamp(colour[1], 0.0f, 255.0f));
+      output_image.data[base + 2] = static_cast<uint8_t>(std::clamp(colour[2], 0.0f, 255.0f));
+    }
+    return true;
   }
 
   const bool dominant_only = equirect_blend_factor_ == 0.0;
