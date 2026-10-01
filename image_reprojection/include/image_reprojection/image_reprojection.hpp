@@ -75,8 +75,12 @@ class ImageReprojection : public rclcpp::Node {
   };
 
   struct DominantPixelMapping {
-    PixelMapping pixel;
     uint32_t camera{std::numeric_limits<uint32_t>::max()};
+    uint32_t source_offset{0};
+    float dx{0.0f};
+    float dy{0.0f};
+    uint8_t right_step{0};
+    uint8_t down_step{0};
   };
 
   enum class AggregationMode {

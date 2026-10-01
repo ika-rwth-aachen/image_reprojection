@@ -127,7 +127,9 @@ blended = (1 - blend_factor) * dominant + blend_factor * weighted_average
 - `K[0,0]` stores horizontal FOV in radians and `K[1,1]` stores vertical FOV
   in radians for consumers.
 - Static precompute includes sin/cos tables for latitude and longitude plus
-  per-camera warp maps when cached TF is available.
+  per-camera warp maps when cached TF is available. With zero blending and all
+  static camera maps ready, a combined map stores the winning camera and
+  bilinear sample data for each output pixel.
 
 ## Parameters
 

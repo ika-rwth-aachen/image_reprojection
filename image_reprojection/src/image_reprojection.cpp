@@ -591,6 +591,8 @@ void ImageReprojection::rebuildEquirectDominantWarpCache() {
   const size_t pixel_count = static_cast<size_t>(equirect_width_) * equirect_height_;
   for (size_t i = 0; i < input_configs_.size(); ++i) {
     if (!equirect_warp_ready_[i] || equirect_warp_maps_[i].size() != pixel_count) return;
+    const auto& intr = static_intrinsics_[i];
+    if (static_cast<uint64_t>(intr.width) * intr.height * 3 > std::numeric_limits<uint32_t>::max()) return;
   }
 
   equirect_dominant_map_.assign(pixel_count, DominantPixelMapping{});
@@ -606,7 +608,13 @@ void ImageReprojection::rebuildEquirectDominantWarpCache() {
           entry.v > max_v) {
         continue;
       }
-      selected.pixel = entry;
+      const int x0 = static_cast<int>(std::floor(entry.u));
+      const int y0 = static_cast<int>(std::floor(entry.v));
+      selected.source_offset = static_cast<uint32_t>((static_cast<uint64_t>(y0) * static_intrinsics_[camera].width + x0) * 3);
+      selected.dx = entry.u - static_cast<float>(x0);
+      selected.dy = entry.v - static_cast<float>(y0);
+      selected.right_step = x0 + 1 < static_intrinsics_[camera].width ? 3 : 0;
+      selected.down_step = y0 + 1 < static_intrinsics_[camera].height ? 1 : 0;
       selected.camera = static_cast<uint32_t>(camera);
     }
   }
@@ -1902,11 +1910,18 @@ bool ImageReprojection::reprojectEquirectangular(const std::vector<BgrImage>& in
     for (size_t pixel = 0; pixel < pixel_count; ++pixel) {
       const auto& entry = equirect_dominant_map_[pixel];
       if (entry.camera == std::numeric_limits<uint32_t>::max()) continue;
-      const auto colour = bilinearSample(input_images[entry.camera], entry.pixel.u, entry.pixel.v);
+      const auto& image = input_images[entry.camera];
+      const uint8_t* top = image.data.data() + entry.source_offset;
+      const uint8_t* bottom = top + (entry.down_step ? static_cast<size_t>(image.width) * 3 : 0);
+      const double dx = entry.dx;
+      const double dy = entry.dy;
       const size_t base = pixel * 3;
-      output_image.data[base] = static_cast<uint8_t>(std::clamp(colour[0], 0.0f, 255.0f));
-      output_image.data[base + 1] = static_cast<uint8_t>(std::clamp(colour[1], 0.0f, 255.0f));
-      output_image.data[base + 2] = static_cast<uint8_t>(std::clamp(colour[2], 0.0f, 255.0f));
+      for (size_t channel = 0; channel < 3; ++channel) {
+        const float upper = static_cast<float>((1.0 - dx) * top[channel] + dx * top[entry.right_step + channel]);
+        const float lower = static_cast<float>((1.0 - dx) * bottom[channel] + dx * bottom[entry.right_step + channel]);
+        const float value = static_cast<float>((1.0 - dy) * upper + dy * lower);
+        output_image.data[base + channel] = static_cast<uint8_t>(std::clamp(value, 0.0f, 255.0f));
+      }
     }
     return true;
   }
