@@ -26,7 +26,7 @@ flowchart LR
 | Topic | Type | Description |
 | --- | --- | --- |
 | `input.image_topics[:]` | `sensor_msgs/msg/Image` | input images |
-| `input.<IMAGE_TOPIC>.camera_info_topic` | `sensor_msgs/msg/Image` | input camera infos |
+| `input.<IMAGE_TOPIC>.camera_info_topic` | `sensor_msgs/msg/CameraInfo` | input camera infos; best-effort subscription accepts best-effort and reliable publishers |
 
 #### Published Topics
 
@@ -67,7 +67,7 @@ flowchart LR
 | `params.transform_timeout` | `float` | `0.05` | how long to wait for transforms |
 | `params.frame_timeout` | `float` | `1.0` | how long to wait for frames from all inputs |
 | `params.frame_time_tolerance` | `float` | `0.005` | how much time stamp difference to accept between inputs |
-| `params.sync_mode` | `string` | `"wait_all"` | `wait_all`: wait for all inputs; `lead_latest`: start publishing with leading after timeout has passed |
+| `params.sync_mode` | `string` | `"wait_all"` | `wait_all`: match all inputs to camera 0 timestamps; `lead_latest`: publish on camera 0 using other recent images |
 
 ## Launch Files
 

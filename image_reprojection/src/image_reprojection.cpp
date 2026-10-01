@@ -510,6 +510,7 @@ void ImageReprojection::setupParameterCallback() {
         }
         if (sync_changed) {
           frame_accumulators_.clear();
+          for (auto& pending : pending_images_) pending.clear();
           std::fill(latest_image_ready_.begin(), latest_image_ready_.end(), false);
         }
 
@@ -589,6 +590,7 @@ void ImageReprojection::setupTopics() {
 
   auto sensor_qos = rclcpp::SensorDataQoS();
   auto info_qos = rclcpp::QoS(10).reliability(RMW_QOS_POLICY_RELIABILITY_RELIABLE);
+  auto input_info_qos = rclcpp::SensorDataQoS();
 
   if (enable_planar_) {
     planar_image_publisher_ = it.advertise(planar_image_topic_, 1);
@@ -622,6 +624,7 @@ void ImageReprojection::setupTopics() {
   latest_image_ready_.assign(n, false);
   latest_image_stamps_.assign(n, rclcpp::Time());
   latest_image_arrivals_.assign(n, rclcpp::Time());
+  pending_images_.resize(n);
 
   for (size_t i = 0; i < n; ++i) {
     const auto idx = i;
@@ -640,7 +643,7 @@ void ImageReprojection::setupTopics() {
         rclcpp::SubscriptionOptions());
 
     info_subs_[i] = this->create_subscription<CameraInfo>(
-        input_configs_[i].camera_info_topic, info_qos,
+        input_configs_[i].camera_info_topic, input_info_qos,
         [this, idx](const CameraInfo::ConstSharedPtr& msg) { this->cameraInfoCallback(idx, msg); });
 
     RCLCPP_INFO(get_logger(), "Subscribed to image '%s' and camera_info '%s'", input_configs_[i].image_topic.c_str(),
@@ -717,13 +720,13 @@ void ImageReprojection::imageCallback(size_t index, const Image::ConstSharedPtr&
     return;
   }
 
-  BgrImage converted_image;
-  if (!toBgrImage(image, converted_image, get_logger())) {
+  if (!intrinsics_ready_[index]) {
+    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "Ignoring image for cam %zu until CameraInfo is received", index);
     return;
   }
 
-  if (!intrinsics_ready_[index]) {
-    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "Ignoring image for cam %zu until CameraInfo is received", index);
+  BgrImage converted_image;
+  if (!toBgrImage(image, converted_image, get_logger())) {
     return;
   }
 
@@ -735,49 +738,70 @@ void ImageReprojection::imageCallback(size_t index, const Image::ConstSharedPtr&
   }
 
   const int64_t stamp_ns = stamp.nanoseconds();
-  const rclcpp::Duration tolerance = rclcpp::Duration::from_seconds(frame_time_tolerance_sec_);
-
-  auto within_tolerance = [&](const FrameAccumulator& candidate) {
-    const rclcpp::Duration diff = (stamp >= candidate.stamp) ? (stamp - candidate.stamp) : (candidate.stamp - stamp);
-    return diff <= tolerance;
+  const int64_t tolerance_ns = rclcpp::Duration::from_seconds(frame_time_tolerance_sec_).nanoseconds();
+  auto distance = [](int64_t a, int64_t b) { return a >= b ? a - b : b - a; };
+  auto attach = [&](FrameAccumulator& frame, size_t camera, PendingImage&& pending) {
+    frame.images[camera] = std::move(pending.image);
+    frame.intrinsics[camera] = static_intrinsics_[camera];
+    frame.frame_ids[camera] = camera_frame_ids_[camera];
+    frame.arrival_times[camera] = pending.arrival;
+    frame.header_stamps[camera] = pending.stamp;
+    frame.ready[camera] = true;
   };
 
   auto selected_it = frame_accumulators_.end();
-  if (!frame_accumulators_.empty()) {
-    auto lower = frame_accumulators_.lower_bound(stamp_ns);
-    if (lower != frame_accumulators_.end() && within_tolerance(lower->second)) {
-      selected_it = lower;
-    } else if (lower != frame_accumulators_.begin()) {
-      auto prev = std::prev(lower);
-      if (within_tolerance(prev->second)) {
-        selected_it = prev;
+  if (index == 0) {
+    selected_it = frame_accumulators_.find(stamp_ns);
+    if (selected_it == frame_accumulators_.end()) {
+      selected_it = frame_accumulators_.emplace(stamp_ns, FrameAccumulator()).first;
+      auto& frame = selected_it->second;
+      frame.stamp = stamp;
+      frame.images.resize(input_configs_.size());
+      frame.intrinsics.resize(input_configs_.size());
+      frame.frame_ids.resize(input_configs_.size());
+      frame.arrival_times.resize(input_configs_.size());
+      frame.header_stamps.resize(input_configs_.size());
+      frame.ready.assign(input_configs_.size(), false);
+    }
+    attach(selected_it->second, 0, PendingImage{std::move(converted_image), arrival_time, stamp});
+    for (size_t camera = 1; camera < pending_images_.size(); ++camera) {
+      auto& pending = pending_images_[camera];
+      auto best = pending.end();
+      int64_t best_distance = tolerance_ns + 1;
+      for (auto it = pending.begin(); it != pending.end(); ++it) {
+        const int64_t gap = distance(it->first, stamp_ns);
+        if (gap <= tolerance_ns && gap < best_distance) {
+          best = it;
+          best_distance = gap;
+        }
+      }
+      if (best != pending.end()) {
+        attach(selected_it->second, camera, std::move(best->second));
+        pending.erase(best);
       }
     }
-  }
-
-  if (selected_it == frame_accumulators_.end()) {
-    auto insert_result = frame_accumulators_.emplace(stamp_ns, FrameAccumulator());
-    selected_it = insert_result.first;
-    auto& new_frame = selected_it->second;
-    new_frame.stamp = stamp;
-    new_frame.images.resize(input_configs_.size());
-    new_frame.intrinsics.resize(input_configs_.size());
-    new_frame.frame_ids.resize(input_configs_.size());
-    new_frame.arrival_times.resize(input_configs_.size());
-    new_frame.header_stamps.resize(input_configs_.size());
-    new_frame.ready.assign(input_configs_.size(), false);
-    RCLCPP_DEBUG(get_logger(), "Created new frame bucket %ld for camera %zu", selected_it->first, index);
+  } else {
+    int64_t best_distance = tolerance_ns + 1;
+    for (auto it = frame_accumulators_.begin(); it != frame_accumulators_.end(); ++it) {
+      if (it->second.ready[index]) {
+        continue;
+      }
+      const int64_t gap = distance(it->first, stamp_ns);
+      if (gap <= tolerance_ns && gap < best_distance) {
+        selected_it = it;
+        best_distance = gap;
+      }
+    }
+    if (selected_it == frame_accumulators_.end()) {
+      pending_images_[index][stamp_ns] = PendingImage{std::move(converted_image), arrival_time, stamp};
+      cleanupAccumulators(stamp);
+      return;
+    }
+    attach(selected_it->second, index, PendingImage{std::move(converted_image), arrival_time, stamp});
   }
 
   auto& frame = selected_it->second;
   const int64_t frame_key = selected_it->first;
-
-  frame.images[index] = std::move(converted_image);
-  frame.intrinsics[index] = static_intrinsics_[index];
-  frame.frame_ids[index] = camera_frame_ids_[index];
-  frame.arrival_times[index] = arrival_time;
-  frame.header_stamps[index] = stamp;
-  frame.ready[index] = true;
 
   const size_t ready_count = static_cast<size_t>(std::count(frame.ready.begin(), frame.ready.end(), true));
   const bool frame_ready = ready_count == frame.ready.size();
@@ -1379,6 +1403,15 @@ void ImageReprojection::cleanupAccumulators(const rclcpp::Time& current_stamp) {
       ++it;
     }
   }
+  for (auto& pending : pending_images_) {
+    for (auto it = pending.begin(); it != pending.end();) {
+      if (current_stamp - it->second.stamp > timeout) {
+        it = pending.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
 }
 
 bool ImageReprojection::lookupCameraTransforms(const rclcpp::Time& stamp,
@@ -1805,9 +1838,40 @@ bool ImageReprojection::reprojectEquirectangular(const std::vector<BgrImage>& in
     return false;
   }
 
-  prepareEquirectScratchBuffers(camera_count);
+  const bool dominant_only = equirect_blend_factor_ == 0.0;
+  if (!dominant_only) {
+    prepareEquirectScratchBuffers(camera_count);
+  }
   auto& accumulators = equirect_accumulators_;
   auto& weights = equirect_weights_;
+
+  output_image.height = static_cast<uint32_t>(height);
+  output_image.width = static_cast<uint32_t>(width);
+  output_image.encoding = sensor_msgs::image_encodings::BGR8;
+  output_image.is_bigendian = false;
+  output_image.step = static_cast<uint32_t>(width * 3);
+  output_image.data.resize(output_image.step * output_image.height);
+  std::vector<uint8_t> occupied;
+  if (dominant_only) {
+    std::fill(output_image.data.begin(), output_image.data.end(), 0);
+    occupied.assign(pixel_count, 0);
+  }
+  auto write_sample = [&](size_t pixel_index, const std::array<float, 3>& colour,
+                          std::vector<float>& acc, std::vector<float>& weight_buffer) {
+    const size_t base_index = pixel_index * 3;
+    if (dominant_only) {
+      if (occupied[pixel_index]) return;
+      occupied[pixel_index] = 1;
+      output_image.data[base_index] = static_cast<uint8_t>(std::clamp(colour[0], 0.0f, 255.0f));
+      output_image.data[base_index + 1] = static_cast<uint8_t>(std::clamp(colour[1], 0.0f, 255.0f));
+      output_image.data[base_index + 2] = static_cast<uint8_t>(std::clamp(colour[2], 0.0f, 255.0f));
+    } else {
+      acc[base_index] += colour[0];
+      acc[base_index + 1] += colour[1];
+      acc[base_index + 2] += colour[2];
+      weight_buffer[pixel_index] += 1.0f;
+    }
+  };
 
   bool use_precomputed = !recompute_every_frame_;
   if (use_precomputed) {
@@ -1855,6 +1919,7 @@ bool ImageReprojection::reprojectEquirectangular(const std::vector<BgrImage>& in
       const double max_v = static_cast<double>(height_in - 1);
 
       for (size_t pixel_index = 0; pixel_index < pixel_count; ++pixel_index) {
+        if (dominant_only && occupied[pixel_index]) continue;
         const auto& entry = mapping[pixel_index];
         if (!std::isfinite(entry.u) || !std::isfinite(entry.v)) {
           continue;
@@ -1864,11 +1929,7 @@ bool ImageReprojection::reprojectEquirectangular(const std::vector<BgrImage>& in
         }
 
         const std::array<float, 3> colour = bilinearSample(image, static_cast<double>(entry.u), static_cast<double>(entry.v));
-        const size_t base_index = pixel_index * 3;
-        acc[base_index + 0] += colour[0];
-        acc[base_index + 1] += colour[1];
-        acc[base_index + 2] += colour[2];
-        weight_buffer[pixel_index] += 1.0f;
+        write_sample(pixel_index, colour, acc, weight_buffer);
       }
       continue;
     }
@@ -1893,6 +1954,8 @@ bool ImageReprojection::reprojectEquirectangular(const std::vector<BgrImage>& in
       const double cos_lat = equirect_cos_lat_[v];
 
       for (int u = 0; u < width; ++u) {
+        const size_t pixel_index = static_cast<size_t>(v) * width + u;
+        if (dominant_only && occupied[pixel_index]) continue;
         const double sin_lon = equirect_sin_lon_[u];
         const double cos_lon = equirect_cos_lon_[u];
 
@@ -1914,22 +1977,12 @@ bool ImageReprojection::reprojectEquirectangular(const std::vector<BgrImage>& in
         }
 
         const std::array<float, 3> colour = bilinearSample(image, u_in, v_in);
-        const size_t pixel_index = static_cast<size_t>(v) * width + u;
-        const size_t base_index = pixel_index * 3;
-        acc[base_index + 0] += colour[0];
-        acc[base_index + 1] += colour[1];
-        acc[base_index + 2] += colour[2];
-        weight_buffer[pixel_index] += 1.0f;
+        write_sample(pixel_index, colour, acc, weight_buffer);
       }
     }
   }
 
-  output_image.height = static_cast<uint32_t>(height);
-  output_image.width = static_cast<uint32_t>(width);
-  output_image.encoding = sensor_msgs::image_encodings::BGR8;
-  output_image.is_bigendian = false;
-  output_image.step = static_cast<uint32_t>(width * 3);
-  output_image.data.resize(output_image.step * output_image.height);
+  if (dominant_only) return true;
 
   const auto colour_from_accumulator = [](const std::vector<float>& acc, float weight, size_t base_index) {
     std::array<float, 3> colour{0.0f, 0.0f, 0.0f};

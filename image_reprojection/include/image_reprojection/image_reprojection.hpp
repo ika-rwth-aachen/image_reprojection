@@ -62,6 +62,12 @@ class ImageReprojection : public rclcpp::Node {
     std::vector<rclcpp::Time> header_stamps;
   };
 
+  struct PendingImage {
+    BgrImage image;
+    rclcpp::Time arrival;
+    rclcpp::Time stamp;
+  };
+
   struct PixelMapping {
     float u{std::numeric_limits<float>::quiet_NaN()};
     float v{std::numeric_limits<float>::quiet_NaN()};
@@ -198,6 +204,7 @@ class ImageReprojection : public rclcpp::Node {
   std::vector<image_transport::Subscriber> image_subs_{};
   std::vector<rclcpp::Subscription<CameraInfo>::SharedPtr> info_subs_{};
   std::map<int64_t, FrameAccumulator> frame_accumulators_{};
+  std::vector<std::map<int64_t, PendingImage>> pending_images_{};
 
   image_transport::Publisher planar_image_publisher_{};
   rclcpp::Publisher<CameraInfo>::SharedPtr planar_info_publisher_{};
