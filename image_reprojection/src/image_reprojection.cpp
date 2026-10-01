@@ -1538,6 +1538,13 @@ void ImageReprojection::cameraInfoCallback(size_t index, const CameraInfo::Const
   if (index >= input_configs_.size()) return;
   CameraIntrinsics intr;
   if (!extractIntrinsics(info, intr, get_logger())) return;
+  if (intrinsics_ready_[index]) {
+    const auto& previous = static_intrinsics_[index];
+    if (previous.fx == intr.fx && previous.fy == intr.fy && previous.cx == intr.cx && previous.cy == intr.cy &&
+        previous.width == intr.width && previous.height == intr.height && camera_frame_ids_[index] == info->header.frame_id) {
+      return;
+    }
+  }
   const bool intrinsics_were_ready = intrinsics_ready_[index];
   const std::string previous_frame_id = camera_frame_ids_[index];
 
