@@ -100,8 +100,22 @@ class ImageReprojection : public rclcpp::Node {
   void applyPlanarProjectionConfig(int width, int height, double depth, double fov_x_deg, double blend_factor);
   void applyEquirectProjectionConfig(int width, int height, double radius, double fov_x_deg, double blend_factor);
   void rebuildPlanarWarpCaches();
+  void rebuildPlanarDominantWarpCache();
   void rebuildEquirectWarpCaches();
   void rebuildEquirectDominantWarpCache();
+  bool buildDominantWarpCache(const std::vector<std::vector<PixelMapping>>& warp_maps,
+                             const std::vector<bool>& warp_ready,
+                             int width,
+                             int height,
+                             std::vector<DominantPixelMapping>& destination) const;
+  bool renderDominantWarpCache(const std::vector<BgrImage>& input_images,
+                               const std::vector<CameraIntrinsics>& intrinsics,
+                               size_t active_count,
+                               int width,
+                               int height,
+                               const std::vector<DominantPixelMapping>& mapping,
+                               bool ready,
+                               sensor_msgs::msg::Image& output_image) const;
   void imageCallback(size_t index, const Image::ConstSharedPtr& image);
   void cameraInfoCallback(size_t index, const CameraInfo::ConstSharedPtr& info);
   void cleanupAccumulators(const rclcpp::Time& current_stamp);
@@ -203,6 +217,8 @@ class ImageReprojection : public rclcpp::Node {
   mutable std::vector<std::vector<float>> equirect_weights_;
 
   std::vector<std::vector<PixelMapping>> planar_warp_maps_;
+  std::vector<DominantPixelMapping> planar_dominant_map_;
+  bool planar_dominant_map_ready_{false};
   std::vector<std::vector<PixelMapping>> equirect_warp_maps_;
   std::vector<DominantPixelMapping> equirect_dominant_map_;
   bool equirect_dominant_map_ready_{false};

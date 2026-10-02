@@ -69,6 +69,11 @@ flowchart LR
 | `params.frame_time_tolerance` | `float` | `0.005` | how much time stamp difference to accept between inputs |
 | `params.sync_mode` | `string` | `"wait_all"` | `wait_all`: match all inputs to camera 0 timestamps; `lead_latest`: publish on camera 0 using other recent images |
 
+For either projection, `blend_factor: 0` uses a precomputed winning-camera map
+when transforms are static and all camera images match their CameraInfo sizes.
+Dynamic transforms and partial camera sets use direct sampling without blend
+buffers. Nonzero blending retains the weighted multi-camera path.
+
 ## Launch Files
 
 ### [`image_reprojection_launch.py`](launch/image_reprojection_launch.py)

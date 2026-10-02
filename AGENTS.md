@@ -111,7 +111,9 @@ blended = (1 - blend_factor) * dominant + blend_factor * weighted_average
 - Output CameraInfo uses `distortion_model = "plumb_bob"` and the computed
   pinhole intrinsics.
 - Static precompute includes per-column `x_norm`, per-row `y_norm`, and
-  per-camera warp maps when cached TF is available.
+  per-camera warp maps when cached TF is available. With zero blending and all
+  static camera maps ready, a combined map stores the winning camera and
+  bilinear sample data for each output pixel.
 
 ### Equirectangular Panorama
 
