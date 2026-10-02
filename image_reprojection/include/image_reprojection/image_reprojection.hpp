@@ -4,6 +4,8 @@
 #pragma once
 
 #include <array>
+#include <chrono>
+#include <cstdint>
 #include <limits>
 #include <map>
 #include <memory>
@@ -54,6 +56,7 @@ class ImageReprojection : public rclcpp::Node {
 
   struct FrameAccumulator {
     rclcpp::Time stamp;
+    std::chrono::steady_clock::time_point created_at;
     std::vector<bool> ready;
     std::vector<BgrImage> images;
     std::vector<CameraIntrinsics> intrinsics;
@@ -62,9 +65,24 @@ class ImageReprojection : public rclcpp::Node {
     std::vector<rclcpp::Time> header_stamps;
   };
 
+  struct PendingImage {
+    BgrImage image;
+    rclcpp::Time arrival;
+    rclcpp::Time stamp;
+  };
+
   struct PixelMapping {
     float u{std::numeric_limits<float>::quiet_NaN()};
     float v{std::numeric_limits<float>::quiet_NaN()};
+  };
+
+  struct DominantPixelMapping {
+    uint32_t camera{std::numeric_limits<uint32_t>::max()};
+    uint32_t source_offset{0};
+    float dx{0.0f};
+    float dy{0.0f};
+    uint8_t right_step{0};
+    uint8_t down_step{0};
   };
 
   enum class AggregationMode {
@@ -84,10 +102,26 @@ class ImageReprojection : public rclcpp::Node {
   void applyPlanarProjectionConfig(int width, int height, double depth, double fov_x_deg, double blend_factor);
   void applyEquirectProjectionConfig(int width, int height, double radius, double fov_x_deg, double blend_factor);
   void rebuildPlanarWarpCaches();
+  void rebuildPlanarDominantWarpCache();
   void rebuildEquirectWarpCaches();
+  void rebuildEquirectDominantWarpCache();
+  bool buildDominantWarpCache(const std::vector<std::vector<PixelMapping>>& warp_maps,
+                             const std::vector<bool>& warp_ready,
+                             int width,
+                             int height,
+                             std::vector<DominantPixelMapping>& destination) const;
+  bool renderDominantWarpCache(const std::vector<BgrImage>& input_images,
+                               const std::vector<CameraIntrinsics>& intrinsics,
+                               size_t active_count,
+                               int width,
+                               int height,
+                               const std::vector<DominantPixelMapping>& mapping,
+                               bool ready,
+                               sensor_msgs::msg::Image& output_image) const;
   void imageCallback(size_t index, const Image::ConstSharedPtr& image);
   void cameraInfoCallback(size_t index, const CameraInfo::ConstSharedPtr& info);
   void cleanupAccumulators(const rclcpp::Time& current_stamp);
+  void expireFrameAccumulators();
   void processFrame(int64_t frame_key, FrameAccumulator& frame, const std::vector<bool>& camera_mask);
   void processLeadCameraImage(size_t index, const rclcpp::Time& stamp, const rclcpp::Time& arrival_time, BgrImage&& image);
   void exportGstConfigIfReady();
@@ -153,6 +187,7 @@ class ImageReprojection : public rclcpp::Node {
   double transform_timeout_sec_{0.05};
   double accumulator_timeout_sec_{1.0};
   double frame_time_tolerance_sec_{0.005};
+  bool wait_all_publish_partial_{true};
   bool recompute_every_frame_{false};
 
   std::vector<BgrImage> latest_images_;
@@ -186,7 +221,11 @@ class ImageReprojection : public rclcpp::Node {
   mutable std::vector<std::vector<float>> equirect_weights_;
 
   std::vector<std::vector<PixelMapping>> planar_warp_maps_;
+  std::vector<DominantPixelMapping> planar_dominant_map_;
+  bool planar_dominant_map_ready_{false};
   std::vector<std::vector<PixelMapping>> equirect_warp_maps_;
+  std::vector<DominantPixelMapping> equirect_dominant_map_;
+  bool equirect_dominant_map_ready_{false};
   std::vector<bool> planar_warp_ready_;
   std::vector<bool> equirect_warp_ready_;
 
@@ -195,9 +234,11 @@ class ImageReprojection : public rclcpp::Node {
 
   // Subscriptions
   rclcpp::TimerBase::SharedPtr setup_timer_;
+  rclcpp::TimerBase::SharedPtr frame_timeout_timer_;
   std::vector<image_transport::Subscriber> image_subs_{};
   std::vector<rclcpp::Subscription<CameraInfo>::SharedPtr> info_subs_{};
   std::map<int64_t, FrameAccumulator> frame_accumulators_{};
+  std::vector<std::map<int64_t, PendingImage>> pending_images_{};
 
   image_transport::Publisher planar_image_publisher_{};
   rclcpp::Publisher<CameraInfo>::SharedPtr planar_info_publisher_{};
