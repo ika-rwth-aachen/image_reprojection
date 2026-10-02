@@ -72,7 +72,11 @@ See `gst_image_reprojection/README.md` for the install path and example pipeline
   arrives, using the latest available images from the other cameras if their
   stamps are within tolerance.
 
-Old partial `wait_all` buckets are removed after `params.frame_timeout`.
+After `params.frame_timeout` of wall time, partial `wait_all` buckets are
+published with their available cameras by default, leaving missing regions
+empty. Set `params.wait_all_publish_partial: false` to discard them instead.
+`params.frame_time_tolerance` still controls which image timestamps match a
+camera 0 frame. A timer flushes timed-out buckets even if input stops.
 
 ## Transforms and Caching
 
@@ -174,6 +178,7 @@ params:
   transform_timeout: 0.05
   frame_timeout: 1.0
   frame_time_tolerance: 0.005
+  wait_all_publish_partial: true
   recompute_every_frame: false
 ```
 

@@ -172,6 +172,11 @@ ImageReprojection::ImageReprojection(const rclcpp::NodeOptions& options) : rclcp
     setupParameterCallback();
     setup_timer_->cancel();
   });
+  frame_timeout_timer_ = this->create_wall_timer(std::chrono::milliseconds(10), [this]() {
+    std::unique_lock<std::mutex> lock(state_mutex_, std::try_to_lock);
+    if (!lock.owns_lock()) return;
+    if (aggregation_mode_ == AggregationMode::WaitForAll) expireFrameAccumulators();
+  });
 }
 
 void ImageReprojection::loadParameters() {
@@ -208,6 +213,7 @@ void ImageReprojection::loadParameters() {
     RCLCPP_WARN(get_logger(), "frame_time_tolerance must be non-negative. Using 0.0 instead of %.6f.", frame_time_tolerance_sec_);
     frame_time_tolerance_sec_ = 0.0;
   }
+  wait_all_publish_partial_ = this->declare_parameter<bool>("params.wait_all_publish_partial", true, dynamic);
 
   gst_config_export_path_ = this->declare_parameter<std::string>("output.gstreamer.config_export_path", "", fixed);
   if (!gst_config_export_path_.empty()) {
@@ -360,6 +366,7 @@ void ImageReprojection::setupParameterCallback() {
         double transform_timeout_sec = transform_timeout_sec_;
         double accumulator_timeout_sec = accumulator_timeout_sec_;
         double frame_time_tolerance_sec = frame_time_tolerance_sec_;
+        bool wait_all_publish_partial = wait_all_publish_partial_;
         AggregationMode aggregation_mode = aggregation_mode_;
 
         bool planar_changed = false;
@@ -424,6 +431,9 @@ void ImageReprojection::setupParameterCallback() {
           } else if (name == "params.frame_time_tolerance") {
             if (type != rclcpp::ParameterType::PARAMETER_DOUBLE) return fail(name + " must be a double");
             frame_time_tolerance_sec = parameter.as_double();
+          } else if (name == "params.wait_all_publish_partial") {
+            if (type != rclcpp::ParameterType::PARAMETER_BOOL) return fail(name + " must be a bool");
+            wait_all_publish_partial = parameter.as_bool();
           } else if (name == "params.sync_mode") {
             if (type != rclcpp::ParameterType::PARAMETER_STRING) return fail(name + " must be a string");
             if (!parse_sync_mode(parameter.as_string(), aggregation_mode)) {
@@ -498,6 +508,7 @@ void ImageReprojection::setupParameterCallback() {
         transform_timeout_sec_ = transform_timeout_sec;
         accumulator_timeout_sec_ = accumulator_timeout_sec;
         frame_time_tolerance_sec_ = frame_time_tolerance_sec;
+        wait_all_publish_partial_ = wait_all_publish_partial;
         aggregation_mode_ = aggregation_mode;
 
         if (recompute_changed) {
@@ -818,6 +829,7 @@ void ImageReprojection::imageCallback(size_t index, const Image::ConstSharedPtr&
       selected_it = frame_accumulators_.emplace(stamp_ns, FrameAccumulator()).first;
       auto& frame = selected_it->second;
       frame.stamp = stamp;
+      frame.created_at = std::chrono::steady_clock::now();
       frame.images.resize(input_configs_.size());
       frame.intrinsics.resize(input_configs_.size());
       frame.frame_ids.resize(input_configs_.size());
@@ -1458,19 +1470,32 @@ void ImageReprojection::processFrame(int64_t frame_key, FrameAccumulator& frame,
   restore_images();
 }
 
-void ImageReprojection::cleanupAccumulators(const rclcpp::Time& current_stamp) {
+void ImageReprojection::expireFrameAccumulators() {
   if (accumulator_timeout_sec_ <= 0.0) {
     return;
   }
-
-  const rclcpp::Duration timeout = rclcpp::Duration::from_seconds(accumulator_timeout_sec_);
+  const auto now = std::chrono::steady_clock::now();
+  const auto timeout = std::chrono::duration<double>(accumulator_timeout_sec_);
   for (auto it = frame_accumulators_.begin(); it != frame_accumulators_.end();) {
-    if (current_stamp - it->second.stamp > timeout) {
+    if (now - it->second.created_at > timeout) {
+      if (wait_all_publish_partial_) {
+        const size_t ready_count = static_cast<size_t>(std::count(it->second.ready.begin(), it->second.ready.end(), true));
+        RCLCPP_DEBUG(get_logger(), "Frame %ld timed out: publishing %zu/%zu cameras", it->first, ready_count,
+                     it->second.ready.size());
+        if (ready_count > 0) processFrame(it->first, it->second, it->second.ready);
+      }
       it = frame_accumulators_.erase(it);
     } else {
       ++it;
     }
   }
+}
+
+void ImageReprojection::cleanupAccumulators(const rclcpp::Time& current_stamp) {
+  if (accumulator_timeout_sec_ <= 0.0) return;
+  if (aggregation_mode_ == AggregationMode::WaitForAll) expireFrameAccumulators();
+
+  const rclcpp::Duration timeout = rclcpp::Duration::from_seconds(accumulator_timeout_sec_);
   for (auto& pending : pending_images_) {
     for (auto it = pending.begin(); it != pending.end();) {
       if (current_stamp - it->second.stamp > timeout) {

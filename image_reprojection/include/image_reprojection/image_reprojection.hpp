@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <limits>
 #include <map>
@@ -55,6 +56,7 @@ class ImageReprojection : public rclcpp::Node {
 
   struct FrameAccumulator {
     rclcpp::Time stamp;
+    std::chrono::steady_clock::time_point created_at;
     std::vector<bool> ready;
     std::vector<BgrImage> images;
     std::vector<CameraIntrinsics> intrinsics;
@@ -119,6 +121,7 @@ class ImageReprojection : public rclcpp::Node {
   void imageCallback(size_t index, const Image::ConstSharedPtr& image);
   void cameraInfoCallback(size_t index, const CameraInfo::ConstSharedPtr& info);
   void cleanupAccumulators(const rclcpp::Time& current_stamp);
+  void expireFrameAccumulators();
   void processFrame(int64_t frame_key, FrameAccumulator& frame, const std::vector<bool>& camera_mask);
   void processLeadCameraImage(size_t index, const rclcpp::Time& stamp, const rclcpp::Time& arrival_time, BgrImage&& image);
   void exportGstConfigIfReady();
@@ -184,6 +187,7 @@ class ImageReprojection : public rclcpp::Node {
   double transform_timeout_sec_{0.05};
   double accumulator_timeout_sec_{1.0};
   double frame_time_tolerance_sec_{0.005};
+  bool wait_all_publish_partial_{true};
   bool recompute_every_frame_{false};
 
   std::vector<BgrImage> latest_images_;
@@ -230,6 +234,7 @@ class ImageReprojection : public rclcpp::Node {
 
   // Subscriptions
   rclcpp::TimerBase::SharedPtr setup_timer_;
+  rclcpp::TimerBase::SharedPtr frame_timeout_timer_;
   std::vector<image_transport::Subscriber> image_subs_{};
   std::vector<rclcpp::Subscription<CameraInfo>::SharedPtr> info_subs_{};
   std::map<int64_t, FrameAccumulator> frame_accumulators_{};

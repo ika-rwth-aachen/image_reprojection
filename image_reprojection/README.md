@@ -68,6 +68,7 @@ flowchart LR
 | `params.frame_timeout` | `float` | `1.0` | how long to wait for frames from all inputs |
 | `params.frame_time_tolerance` | `float` | `0.005` | how much time stamp difference to accept between inputs |
 | `params.sync_mode` | `string` | `"wait_all"` | `wait_all`: match all inputs to camera 0 timestamps; `lead_latest`: publish on camera 0 using other recent images |
+| `params.wait_all_publish_partial` | `bool` | `true` | in `wait_all`, publish available cameras after `frame_timeout`; when `false`, discard incomplete frames |
 
 For either projection, `blend_factor: 0` uses a precomputed winning-camera map
 when transforms are static and all camera images match their CameraInfo sizes.
