@@ -70,6 +70,9 @@ flowchart LR
 | `params.sync_mode` | `string` | `"wait_all"` | `wait_all`: match all inputs to camera 0 timestamps; `lead_latest`: publish on camera 0 using other recent images |
 | `params.wait_all_publish_partial` | `bool` | `true` | in `wait_all`, publish available cameras after `frame_timeout`; when `false`, discard incomplete frames |
 
+The exported GStreamer JSON includes a `sync` object with these four synchronization
+settings. The GStreamer plugin uses the exported values at startup.
+
 For either projection, `blend_factor: 0` uses a precomputed winning-camera map
 when transforms are static and all camera images match their CameraInfo sizes.
 Dynamic transforms and partial camera sets use direct sampling without blend

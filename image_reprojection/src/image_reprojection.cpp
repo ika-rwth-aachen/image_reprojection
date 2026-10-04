@@ -504,12 +504,17 @@ void ImageReprojection::setupParameterCallback() {
           markGstConfigDirty();
         }
 
+        const bool sync_export_changed = accumulator_timeout_sec != accumulator_timeout_sec_ ||
+                                         frame_time_tolerance_sec != frame_time_tolerance_sec_ ||
+                                         wait_all_publish_partial != wait_all_publish_partial_ ||
+                                         aggregation_mode != aggregation_mode_;
         recompute_every_frame_ = recompute_every_frame;
         transform_timeout_sec_ = transform_timeout_sec;
         accumulator_timeout_sec_ = accumulator_timeout_sec;
         frame_time_tolerance_sec_ = frame_time_tolerance_sec;
         wait_all_publish_partial_ = wait_all_publish_partial;
         aggregation_mode_ = aggregation_mode;
+        if (sync_export_changed) markGstConfigDirty();
 
         if (recompute_changed) {
           std::fill(planar_warp_ready_.begin(), planar_warp_ready_.end(), false);
@@ -527,7 +532,7 @@ void ImageReprojection::setupParameterCallback() {
           std::fill(latest_image_ready_.begin(), latest_image_ready_.end(), false);
         }
 
-        if (planar_changed || equirect_changed) {
+        if (planar_changed || equirect_changed || sync_export_changed) {
           exportGstConfigIfReady();
         }
 
@@ -1036,6 +1041,11 @@ void ImageReprojection::exportGstConfigIfReady() {
   json << "{\n";
   json << "  \"generated_by\": \"image_reprojection\",\n";
   json << "  \"camera_count\": " << camera_count << ",\n";
+  json << "  \"sync\": {\"mode\": \""
+       << (aggregation_mode_ == AggregationMode::WaitForAll ? "wait_all" : "lead_latest")
+       << "\", \"frame_timeout\": " << accumulator_timeout_sec_
+       << ", \"frame_time_tolerance\": " << frame_time_tolerance_sec_
+       << ", \"wait_all_publish_partial\": " << (wait_all_publish_partial_ ? "true" : "false") << "},\n";
   json << "  \"cameras\": [\n";
   for (size_t i = 0; i < camera_count; ++i) {
     const auto& config = input_configs_[i];

@@ -31,6 +31,11 @@ typedef enum {
   GST_IMAGE_REPROJECTION_MODE_EQUIRECT
 } GstImageReprojectionMode;
 
+typedef enum {
+  GST_IMAGE_REPROJECTION_SYNC_WAIT_ALL,
+  GST_IMAGE_REPROJECTION_SYNC_LEAD_LATEST
+} GstImageReprojectionSyncMode;
+
 static GType gst_image_reprojection_mode_get_type(void);
 #define GST_TYPE_IMAGE_REPROJECTION_MODE (gst_image_reprojection_mode_get_type())
 
@@ -55,6 +60,10 @@ typedef struct {
   double cy;
   int width;
   int height;
+  int map_width;
+  int map_height;
+  int stride;
+  gsize plane_offset;
   double planar_matrix[16];
   double equirect_matrix[16];
   gboolean has_planar_matrix;
@@ -98,6 +107,15 @@ typedef struct {
   float v;
 } GstImageReprojectionPixelMap;
 
+typedef struct {
+  guint camera;
+  gsize source_offset;
+  float dx;
+  float dy;
+  guint8 right_step;
+  guint down_step;
+} GstImageReprojectionDominantMap;
+
 typedef struct _GstImageReprojectionPad {
   GstAggregatorPad parent;
   guint index;
@@ -117,17 +135,24 @@ typedef struct _GstImageReprojection {
   gboolean config_loaded;
   gboolean warned_pad_count;
   gboolean initial_events_pushed;
+  GstImageReprojectionSyncMode sync_mode;
+  double frame_timeout_sec;
+  GstClockTime frame_time_tolerance;
+  gboolean wait_all_publish_partial;
 
   GMutex lock;
 
   guint camera_count;
   GstImageReprojectionCamera* cameras;
+  GstBuffer** latest_buffers;
 
   GstImageReprojectionPlanar planar;
   GstImageReprojectionEquirect equirect;
 
   GstImageReprojectionPixelMap** planar_maps; /* [camera][pixel] */
   GstImageReprojectionPixelMap** equirect_maps;
+  GstImageReprojectionDominantMap* planar_dominant_map;
+  GstImageReprojectionDominantMap* equirect_dominant_map;
 
   float** planar_accumulators;
   float** planar_weights;
@@ -135,6 +160,7 @@ typedef struct _GstImageReprojection {
   float** equirect_weights;
 
   GstCaps* src_caps;
+  GstVideoInfo output_info;
   GstSegment segment;
 
   guint next_pad_index;
@@ -167,7 +193,9 @@ static void gst_image_reprojection_get_property(GObject* object, guint prop_id, 
 static void gst_image_reprojection_dispose(GObject* object);
 static gboolean gst_image_reprojection_start(GstAggregator* aggregator);
 static gboolean gst_image_reprojection_stop(GstAggregator* aggregator);
+static GstFlowReturn gst_image_reprojection_flush(GstAggregator* aggregator);
 static GstFlowReturn gst_image_reprojection_aggregate(GstAggregator* aggregator, gboolean timeout);
+static GstClockTime gst_image_reprojection_get_next_time(GstAggregator* aggregator);
 static GstAggregatorPad* gst_image_reprojection_create_new_pad(GstAggregator* aggregator,
                                                                GstPadTemplate* templ,
                                                                const gchar* name,
@@ -215,7 +243,9 @@ static void gst_image_reprojection_class_init(GstImageReprojectionClass* klass) 
 
   aggregator_class->start = gst_image_reprojection_start;
   aggregator_class->stop = gst_image_reprojection_stop;
+  aggregator_class->flush = gst_image_reprojection_flush;
   aggregator_class->aggregate = gst_image_reprojection_aggregate;
+  aggregator_class->get_next_time = gst_image_reprojection_get_next_time;
   aggregator_class->create_new_pad = gst_image_reprojection_create_new_pad;
   aggregator_class->sink_event = gst_image_reprojection_sink_event;
 }
@@ -234,16 +264,25 @@ static void gst_image_reprojection_init(GstImageReprojection* self) {
   self->config_loaded = FALSE;
   self->warned_pad_count = FALSE;
   self->initial_events_pushed = FALSE;
+  self->sync_mode = GST_IMAGE_REPROJECTION_SYNC_WAIT_ALL;
+  self->frame_timeout_sec = 1.0;
+  self->frame_time_tolerance = 5 * GST_MSECOND;
+  self->wait_all_publish_partial = TRUE;
+  gst_aggregator_set_force_live(GST_AGGREGATOR(self), TRUE);
+  gst_aggregator_set_ignore_inactive_pads(GST_AGGREGATOR(self), TRUE);
   g_mutex_init(&self->lock);
 
   self->camera_count = 0;
   self->cameras = NULL;
+  self->latest_buffers = NULL;
 
   memset(&self->planar, 0, sizeof(self->planar));
   memset(&self->equirect, 0, sizeof(self->equirect));
 
   self->planar_maps = NULL;
   self->equirect_maps = NULL;
+  self->planar_dominant_map = NULL;
+  self->equirect_dominant_map = NULL;
 
   self->planar_accumulators = NULL;
   self->planar_weights = NULL;
@@ -251,6 +290,7 @@ static void gst_image_reprojection_init(GstImageReprojection* self) {
   self->equirect_weights = NULL;
 
   self->src_caps = NULL;
+  gst_video_info_init(&self->output_info);
   gst_segment_init(&self->segment, GST_FORMAT_TIME);
 
   self->next_pad_index = 0;
@@ -313,10 +353,19 @@ static GstAggregatorPad* gst_image_reprojection_create_new_pad(GstAggregator* ag
                                                                const GstCaps* caps) {
   GstImageReprojection* self = GST_IMAGE_REPROJECTION(aggregator);
   GstImageReprojectionPad* pad;
-
-  pad = g_object_new(GST_TYPE_IMAGE_REPROJECTION_PAD, "name", name ? name : "sink_%u", "direction", GST_PAD_SINK, "template",
-                     templ, NULL);
-  pad->index = self->next_pad_index++;
+  const gboolean auto_name = !name || g_strcmp0(name, "sink_%u") == 0;
+  guint index = self->next_pad_index;
+  if (!auto_name && g_str_has_prefix(name, "sink_")) {
+    gchar* end = NULL;
+    const guint64 parsed = g_ascii_strtoull(name + 5, &end, 10);
+    if (end != name + 5 && *end == '\0' && parsed < G_MAXUINT) index = (guint)parsed;
+  }
+  gchar* generated_name = auto_name ? g_strdup_printf("sink_%u", index) : NULL;
+  pad = g_object_new(GST_TYPE_IMAGE_REPROJECTION_PAD, "name", auto_name ? generated_name : name, "direction", GST_PAD_SINK,
+                     "template", templ, NULL);
+  g_free(generated_name);
+  pad->index = index;
+  self->next_pad_index = MAX(self->next_pad_index, index + 1);
 
   GST_DEBUG_OBJECT(self, "Created new sink pad %u", pad->index);
 
@@ -378,6 +427,18 @@ static gboolean gst_image_reprojection_stop(GstAggregator* aggregator) {
   return TRUE;
 }
 
+static GstFlowReturn gst_image_reprojection_flush(GstAggregator* aggregator) {
+  GstImageReprojection* self = GST_IMAGE_REPROJECTION(aggregator);
+  for (guint i = 0; i < self->camera_count; ++i) {
+    if (self->latest_buffers && self->latest_buffers[i]) {
+      gst_buffer_unref(self->latest_buffers[i]);
+      self->latest_buffers[i] = NULL;
+    }
+  }
+  GstAggregatorClass* parent = GST_AGGREGATOR_CLASS(gst_image_reprojection_parent_class);
+  return parent->flush ? parent->flush(aggregator) : GST_FLOW_OK;
+}
+
 static inline gboolean isfinitef(float v) { return isfinite(v); }
 
 static inline float clampf(float v, float min_v, float max_v) {
@@ -386,7 +447,8 @@ static inline float clampf(float v, float min_v, float max_v) {
   return v;
 }
 
-static inline void bilinear_sample(const guint8* data, guint width, guint height, float u, float v, float out[3]) {
+static inline void bilinear_sample(const guint8* data, guint width, guint height, guint stride, float u, float v,
+                                   float out[3]) {
   if (width == 0 || height == 0) {
     out[0] = out[1] = out[2] = 0.0f;
     return;
@@ -403,9 +465,8 @@ static inline void bilinear_sample(const guint8* data, guint width, guint height
   float dx = u_clamped - (float)x0;
   float dy = v_clamped - (float)y0;
 
-  const guint stride = width * 3;
-  const guint8* row0 = data + y0 * stride;
-  const guint8* row1 = data + y1 * stride;
+  const guint8* row0 = data + (gsize)y0 * stride;
+  const guint8* row1 = data + (gsize)y1 * stride;
 
   const guint8* p00 = row0 + x0 * 3;
   const guint8* p10 = row0 + x1 * 3;
@@ -419,6 +480,99 @@ static inline void bilinear_sample(const guint8* data, guint width, guint height
   }
 }
 
+static GstImageReprojectionDominantMap* gst_image_reprojection_build_dominant_map(
+    GstImageReprojection* self, GstImageReprojectionPixelMap** maps, gsize pixel_count) {
+  GstImageReprojectionDominantMap* dominant = g_new0(GstImageReprojectionDominantMap, pixel_count);
+  for (gsize p = 0; p < pixel_count; ++p) dominant[p].camera = G_MAXUINT;
+  for (guint i = 0; i < self->camera_count; ++i) {
+    const guint width = self->cameras[i].map_width;
+    const guint height = self->cameras[i].map_height;
+    const guint stride = GST_ROUND_UP_4(width * 3);
+    for (gsize p = 0; p < pixel_count; ++p) {
+      GstImageReprojectionDominantMap* selected = &dominant[p];
+      if (selected->camera != G_MAXUINT) continue;
+      const float u = maps[i][p].u;
+      const float v = maps[i][p].v;
+      if (!isfinitef(u) || !isfinitef(v) || u < 0.0f || v < 0.0f || u > (float)(width - 1) ||
+          v > (float)(height - 1)) continue;
+      const guint x = (guint)floorf(u);
+      const guint y = (guint)floorf(v);
+      selected->camera = i;
+      selected->source_offset = (gsize)y * stride + (gsize)x * 3;
+      selected->dx = u - (float)x;
+      selected->dy = v - (float)y;
+      selected->right_step = x + 1 < width ? 3 : 0;
+      selected->down_step = y + 1 < height ? stride : 0;
+    }
+  }
+  return dominant;
+}
+
+static GstFlowReturn gst_image_reprojection_process_zero_blend(GstImageReprojection* self, GstBuffer** buffers,
+                                                                GstMapInfo* maps, GstImageReprojectionPixelMap** pixel_maps,
+                                                                const GstImageReprojectionDominantMap* dominant,
+                                                                guint width, guint height, GstBuffer** out_buffer_ptr) {
+  const gsize pixel_count = (gsize)width * height;
+  const guint output_stride = GST_VIDEO_INFO_COMP_STRIDE(&self->output_info, 0);
+  GstBuffer* out = gst_buffer_new_allocate(NULL, GST_VIDEO_INFO_SIZE(&self->output_info), NULL);
+  GstMapInfo out_map;
+  if (!out || !gst_buffer_map(out, &out_map, GST_MAP_WRITE)) {
+    if (out) gst_buffer_unref(out);
+    return GST_FLOW_ERROR;
+  }
+  memset(out_map.data, 0, out_map.size);
+
+  gboolean use_dominant = dominant != NULL;
+  for (guint i = 0; i < self->camera_count; ++i) {
+    const GstImageReprojectionCamera* cam = &self->cameras[i];
+    if (!buffers[i] || cam->width != cam->map_width || cam->height != cam->map_height ||
+        cam->stride != GST_ROUND_UP_4(cam->map_width * 3)) {
+      use_dominant = FALSE;
+      break;
+    }
+  }
+
+  if (use_dominant) {
+    for (gsize p = 0; p < pixel_count; ++p) {
+      const GstImageReprojectionDominantMap* entry = &dominant[p];
+      if (entry->camera == G_MAXUINT) continue;
+      const GstImageReprojectionCamera* cam = &self->cameras[entry->camera];
+      const guint8* top = maps[entry->camera].data + cam->plane_offset + entry->source_offset;
+      const guint8* bottom = top + entry->down_step;
+      guint8* dst = out_map.data + (p / width) * output_stride + (p % width) * 3;
+      for (guint c = 0; c < 3; ++c) {
+        const float upper = (1.0f - entry->dx) * top[c] + entry->dx * top[entry->right_step + c];
+        const float lower = (1.0f - entry->dx) * bottom[c] + entry->dx * bottom[entry->right_step + c];
+        dst[c] = (guint8)clampf((1.0f - entry->dy) * upper + entry->dy * lower, 0.0f, 255.0f);
+      }
+    }
+  } else {
+    guint8* occupied = g_new0(guint8, pixel_count);
+    for (guint i = 0; i < self->camera_count; ++i) {
+      if (!buffers[i]) continue;
+      const GstImageReprojectionCamera* cam = &self->cameras[i];
+      const guint8* data = maps[i].data + cam->plane_offset;
+      for (gsize p = 0; p < pixel_count; ++p) {
+        if (occupied[p]) continue;
+        const float u = pixel_maps[i][p].u;
+        const float v = pixel_maps[i][p].v;
+        if (!isfinitef(u) || !isfinitef(v) || u < 0.0f || v < 0.0f || u > (float)(cam->width - 1) ||
+            v > (float)(cam->height - 1)) continue;
+        float colour[3];
+        bilinear_sample(data, cam->width, cam->height, cam->stride, u, v, colour);
+        guint8* dst = out_map.data + (p / width) * output_stride + (p % width) * 3;
+        for (guint c = 0; c < 3; ++c) dst[c] = (guint8)clampf(colour[c], 0.0f, 255.0f);
+        occupied[p] = 1;
+      }
+    }
+    g_free(occupied);
+  }
+
+  gst_buffer_unmap(out, &out_map);
+  *out_buffer_ptr = out;
+  return GST_FLOW_OK;
+}
+
 static GstFlowReturn gst_image_reprojection_process_planar(GstImageReprojection* self,
                                                            GstBuffer** buffers,
                                                            GstMapInfo* maps,
@@ -428,12 +582,17 @@ static GstFlowReturn gst_image_reprojection_process_planar(GstImageReprojection*
   if (pixel_count == 0) {
     return GST_FLOW_ERROR;
   }
+  if (self->planar.blend_factor == 0.0) {
+    return gst_image_reprojection_process_zero_blend(self, buffers, maps, self->planar_maps,
+                                                     self->planar_dominant_map, self->planar.width,
+                                                     self->planar.height, out_buffer_ptr);
+  }
 
   gst_image_reprojection_reset_scratch_planar(self);
 
   for (guint i = 0; i < camera_count; ++i) {
     if (!buffers[i]) continue;
-    const guint8* data = maps[i].data;
+    const guint8* data = maps[i].data + self->cameras[i].plane_offset;
     if (!data) continue;
 
     const GstImageReprojectionPixelMap* mapping = self->planar_maps[i];
@@ -458,7 +617,7 @@ static GstFlowReturn gst_image_reprojection_process_planar(GstImageReprojection*
       if (u < 0.0f || u > max_u || v < 0.0f || v > max_v) continue;
 
       float colour[3];
-      bilinear_sample(data, width_in, height_in, u, v, colour);
+      bilinear_sample(data, width_in, height_in, self->cameras[i].stride, u, v, colour);
 
       gsize base = p * 3;
       acc[base + 0] += colour[0];
@@ -468,7 +627,7 @@ static GstFlowReturn gst_image_reprojection_process_planar(GstImageReprojection*
     }
   }
 
-  GstBuffer* out = gst_buffer_new_allocate(NULL, self->planar.width * self->planar.height * 3, NULL);
+  GstBuffer* out = gst_buffer_new_allocate(NULL, GST_VIDEO_INFO_SIZE(&self->output_info), NULL);
   if (!out) {
     return GST_FLOW_ERROR;
   }
@@ -480,6 +639,8 @@ static GstFlowReturn gst_image_reprojection_process_planar(GstImageReprojection*
   }
 
   guint8* out_data = out_map.data;
+  memset(out_data, 0, out_map.size);
+  const guint output_stride = GST_VIDEO_INFO_COMP_STRIDE(&self->output_info, 0);
   const float blend = (float)self->planar.blend_factor;
 
   for (gsize p = 0; p < pixel_count; ++p) {
@@ -497,7 +658,7 @@ static GstFlowReturn gst_image_reprojection_process_planar(GstImageReprojection*
       }
     }
 
-    guint8* dst = &out_data[p * 3];
+    guint8* dst = out_data + (p / self->planar.width) * output_stride + (p % self->planar.width) * 3;
     if (total_weight <= 0.0f) {
       dst[0] = dst[1] = dst[2] = 0;
       continue;
@@ -549,12 +710,17 @@ static GstFlowReturn gst_image_reprojection_process_equirect(GstImageReprojectio
   if (pixel_count == 0) {
     return GST_FLOW_ERROR;
   }
+  if (self->equirect.blend_factor == 0.0) {
+    return gst_image_reprojection_process_zero_blend(self, buffers, maps, self->equirect_maps,
+                                                     self->equirect_dominant_map, self->equirect.width,
+                                                     self->equirect.height, out_buffer_ptr);
+  }
 
   gst_image_reprojection_reset_scratch_equirect(self);
 
   for (guint i = 0; i < camera_count; ++i) {
     if (!buffers[i]) continue;
-    const guint8* data = maps[i].data;
+    const guint8* data = maps[i].data + self->cameras[i].plane_offset;
     if (!data) continue;
 
     const GstImageReprojectionPixelMap* mapping = self->equirect_maps[i];
@@ -579,7 +745,7 @@ static GstFlowReturn gst_image_reprojection_process_equirect(GstImageReprojectio
       if (u < 0.0f || u > max_u || v < 0.0f || v > max_v) continue;
 
       float colour[3];
-      bilinear_sample(data, width_in, height_in, u, v, colour);
+      bilinear_sample(data, width_in, height_in, self->cameras[i].stride, u, v, colour);
 
       gsize base = p * 3;
       acc[base + 0] += colour[0];
@@ -589,7 +755,7 @@ static GstFlowReturn gst_image_reprojection_process_equirect(GstImageReprojectio
     }
   }
 
-  GstBuffer* out = gst_buffer_new_allocate(NULL, self->equirect.width * self->equirect.height * 3, NULL);
+  GstBuffer* out = gst_buffer_new_allocate(NULL, GST_VIDEO_INFO_SIZE(&self->output_info), NULL);
   if (!out) {
     return GST_FLOW_ERROR;
   }
@@ -601,6 +767,8 @@ static GstFlowReturn gst_image_reprojection_process_equirect(GstImageReprojectio
   }
 
   guint8* out_data = out_map.data;
+  memset(out_data, 0, out_map.size);
+  const guint output_stride = GST_VIDEO_INFO_COMP_STRIDE(&self->output_info, 0);
   const float blend = (float)self->equirect.blend_factor;
 
   for (gsize p = 0; p < pixel_count; ++p) {
@@ -618,7 +786,7 @@ static GstFlowReturn gst_image_reprojection_process_equirect(GstImageReprojectio
       }
     }
 
-    guint8* dst = &out_data[p * 3];
+    guint8* dst = out_data + (p / self->equirect.width) * output_stride + (p % self->equirect.width) * 3;
     if (total_weight <= 0.0f) {
       dst[0] = dst[1] = dst[2] = 0;
       continue;
@@ -661,10 +829,24 @@ static GstFlowReturn gst_image_reprojection_process_equirect(GstImageReprojectio
   return GST_FLOW_OK;
 }
 
+static GstClockTime gst_image_reprojection_get_next_time(GstAggregator* aggregator) {
+  GstImageReprojection* self = GST_IMAGE_REPROJECTION(aggregator);
+  for (GList* l = GST_ELEMENT(self)->sinkpads; l; l = l->next) {
+    GstImageReprojectionPad* pad = GST_IMAGE_REPROJECTION_PAD(l->data);
+    if (pad->index != 0) continue;
+    GstBuffer* buffer = gst_aggregator_pad_peek_buffer(GST_AGGREGATOR_PAD(pad));
+    if (!buffer) return GST_CLOCK_TIME_NONE;
+    const GstClockTime pts = GST_BUFFER_PTS(buffer);
+    gst_buffer_unref(buffer);
+    return GST_CLOCK_TIME_IS_VALID(pts) ?
+               gst_segment_to_running_time(&GST_AGGREGATOR_PAD(pad)->segment, GST_FORMAT_TIME, pts) :
+               gst_aggregator_simple_get_next_time(aggregator);
+  }
+  return GST_CLOCK_TIME_NONE;
+}
+
 static GstFlowReturn gst_image_reprojection_aggregate(GstAggregator* aggregator, gboolean timeout) {
   GstImageReprojection* self = GST_IMAGE_REPROJECTION(aggregator);
-
-  (void)timeout;
 
   g_mutex_lock(&self->lock);
   if (!self->config_loaded) {
@@ -693,30 +875,103 @@ static GstFlowReturn gst_image_reprojection_aggregate(GstAggregator* aggregator,
 
   GstBuffer** buffers = g_new0(GstBuffer*, self->camera_count);
   GstMapInfo* maps = g_new0(GstMapInfo, self->camera_count);
+  GstImageReprojectionPad** pads = g_new0(GstImageReprojectionPad*, self->camera_count);
   GstBuffer* out_buffer = NULL;
   GstFlowReturn flow = GST_AGGREGATOR_FLOW_NEED_DATA;
 
   for (GList* l = GST_ELEMENT(self)->sinkpads; l; l = l->next) {
-    GstAggregatorPad* pad = GST_AGGREGATOR_PAD(l->data);
-    GstImageReprojectionPad* ip = GST_IMAGE_REPROJECTION_PAD(pad);
+    GstImageReprojectionPad* ip = GST_IMAGE_REPROJECTION_PAD(l->data);
     if (ip->index >= self->camera_count) {
       GST_WARNING_OBJECT(self, "Ignoring sink pad %u beyond camera configuration", ip->index);
       continue;
     }
+    pads[ip->index] = ip;
+  }
 
-    GstBuffer* buffer = gst_aggregator_pad_pop_buffer(pad);
-    if (!buffer) {
-      if (gst_aggregator_pad_is_eos(pad)) {
-        flow = GST_FLOW_EOS;
-        goto need_more_data;
+  if (!pads[0]) goto need_more_data;
+
+  if (self->sync_mode == GST_IMAGE_REPROJECTION_SYNC_LEAD_LATEST) {
+    for (guint i = 1; i < self->camera_count; ++i) {
+      if (!pads[i]) continue;
+      GstBuffer* next = NULL;
+      while ((next = gst_aggregator_pad_pop_buffer(GST_AGGREGATOR_PAD(pads[i]))) != NULL) {
+        if (self->latest_buffers[i]) gst_buffer_unref(self->latest_buffers[i]);
+        self->latest_buffers[i] = next;
       }
-      flow = GST_AGGREGATOR_FLOW_NEED_DATA;
+    }
+    buffers[0] = gst_aggregator_pad_pop_buffer(GST_AGGREGATOR_PAD(pads[0]));
+    if (!buffers[0]) {
+      if (gst_aggregator_pad_is_eos(GST_AGGREGATOR_PAD(pads[0]))) flow = GST_FLOW_EOS;
       goto need_more_data;
     }
+    for (guint i = 1; i < self->camera_count; ++i) {
+      GstBuffer* candidate = self->latest_buffers[i];
+      if (!candidate) continue;
+      if (GST_BUFFER_PTS_IS_VALID(buffers[0]) && GST_BUFFER_PTS_IS_VALID(candidate)) {
+        const GstClockTime lead_pts = GST_BUFFER_PTS(buffers[0]);
+        const GstClockTime candidate_pts = GST_BUFFER_PTS(candidate);
+        const GstClockTime gap = lead_pts >= candidate_pts ? lead_pts - candidate_pts : candidate_pts - lead_pts;
+        if (gap > self->frame_time_tolerance) continue;
+      }
+      buffers[i] = gst_buffer_ref(candidate);
+    }
+  } else {
+    buffers[0] = gst_aggregator_pad_peek_buffer(GST_AGGREGATOR_PAD(pads[0]));
+    if (!buffers[0]) {
+      if (gst_aggregator_pad_is_eos(GST_AGGREGATOR_PAD(pads[0]))) flow = GST_FLOW_EOS;
+      goto need_more_data;
+    }
+    gboolean future_frame_seen = FALSE;
+    guint ready_count = 1;
+    for (guint i = 1; i < self->camera_count; ++i) {
+      if (!pads[i]) continue;
+      GstAggregatorPad* pad = GST_AGGREGATOR_PAD(pads[i]);
+      GstBuffer* candidate = gst_aggregator_pad_peek_buffer(pad);
+      while (candidate && GST_BUFFER_PTS_IS_VALID(buffers[0]) && GST_BUFFER_PTS_IS_VALID(candidate) &&
+             GST_BUFFER_PTS(buffers[0]) > GST_BUFFER_PTS(candidate) &&
+             GST_BUFFER_PTS(buffers[0]) - GST_BUFFER_PTS(candidate) > self->frame_time_tolerance) {
+        gst_buffer_unref(candidate);
+        GstBuffer* stale = gst_aggregator_pad_pop_buffer(pad);
+        if (stale) gst_buffer_unref(stale);
+        candidate = gst_aggregator_pad_peek_buffer(pad);
+      }
+      if (!candidate) continue;
+      if (GST_BUFFER_PTS_IS_VALID(buffers[0]) && GST_BUFFER_PTS_IS_VALID(candidate)) {
+        const GstClockTime lead_pts = GST_BUFFER_PTS(buffers[0]);
+        const GstClockTime candidate_pts = GST_BUFFER_PTS(candidate);
+        if (candidate_pts > lead_pts && candidate_pts - lead_pts > self->frame_time_tolerance) {
+          future_frame_seen = TRUE;
+          gst_buffer_unref(candidate);
+          continue;
+        }
+      }
+      buffers[i] = candidate;
+      ++ready_count;
+    }
+    if (ready_count != self->camera_count && !timeout && !future_frame_seen) goto need_more_data;
+    if (ready_count != self->camera_count && !self->wait_all_publish_partial) {
+      GST_DEBUG_OBJECT(self, "Discarding incomplete frame with %u/%u cameras", ready_count, self->camera_count);
+      for (guint i = 0; i < self->camera_count; ++i) {
+        if (!buffers[i]) continue;
+        GstBuffer* consumed = gst_aggregator_pad_pop_buffer(GST_AGGREGATOR_PAD(pads[i]));
+        if (consumed) gst_buffer_unref(consumed);
+      }
+      goto need_more_data;
+    }
+    for (guint i = 0; i < self->camera_count; ++i) {
+      if (!buffers[i]) continue;
+      GstBuffer* consumed = gst_aggregator_pad_pop_buffer(GST_AGGREGATOR_PAD(pads[i]));
+      if (consumed) gst_buffer_unref(consumed);
+    }
+  }
+
+  for (guint i = 0; i < self->camera_count; ++i) {
+    if (!buffers[i]) continue;
+    GstImageReprojectionPad* ip = pads[i];
 
     GstVideoInfo info = ip->info;
     if (info.width == 0 || info.height == 0) {
-      GstCaps* caps = gst_pad_get_current_caps(GST_PAD(pad));
+      GstCaps* caps = gst_pad_get_current_caps(GST_PAD(ip));
       if (caps) {
         if (!gst_video_info_from_caps(&info, caps)) {
           GST_WARNING_OBJECT(self, "Failed to parse caps for pad %u", ip->index);
@@ -724,28 +979,27 @@ static GstFlowReturn gst_image_reprojection_aggregate(GstAggregator* aggregator,
         gst_caps_unref(caps);
       }
     }
-    if (info.width > 0) {
-      self->cameras[ip->index].width = info.width;
-    }
-    if (info.height > 0) {
-      self->cameras[ip->index].height = info.height;
-    }
-
-    if (!gst_buffer_map(buffer, &maps[ip->index], GST_MAP_READ)) {
+    if (!gst_buffer_map(buffers[i], &maps[i], GST_MAP_READ)) {
       GST_WARNING_OBJECT(self, "Failed to map buffer for pad %u", ip->index);
-      gst_buffer_unref(buffer);
       flow = GST_FLOW_ERROR;
       goto need_more_data;
     }
-
-    buffers[ip->index] = buffer;
-  }
-
-  for (guint i = 0; i < self->camera_count; ++i) {
-    if (!buffers[i]) {
-      flow = GST_AGGREGATOR_FLOW_NEED_DATA;
+    GstVideoMeta* meta = gst_buffer_get_video_meta(buffers[i]);
+    const gint stride = meta ? meta->stride[0] : GST_VIDEO_INFO_COMP_STRIDE(&info, 0);
+    const gsize offset = meta ? meta->offset[0] : info.offset[0];
+    const guint width = meta ? meta->width : (guint)info.width;
+    const guint height = meta ? meta->height : (guint)info.height;
+    if (width == 0 || height == 0 || stride < (gint)(width * 3) || offset > maps[i].size ||
+        (gsize)(height - 1) * stride + (gsize)width * 3 > maps[i].size - offset) {
+      GST_ERROR_OBJECT(self, "Invalid BGR buffer layout on pad %u: %ux%u stride=%d offset=%zu size=%zu", i,
+                       width, height, stride, offset, maps[i].size);
+      flow = GST_FLOW_ERROR;
       goto need_more_data;
     }
+    self->cameras[i].width = width;
+    self->cameras[i].height = height;
+    self->cameras[i].stride = stride;
+    self->cameras[i].plane_offset = offset;
   }
 
   if (self->active_mode == GST_IMAGE_REPROJECTION_MODE_PLANAR) {
@@ -795,6 +1049,7 @@ static GstFlowReturn gst_image_reprojection_aggregate(GstAggregator* aggregator,
     if (GST_CLOCK_TIME_IS_VALID(dts)) GST_BUFFER_DTS(out_buffer) = dts;
     if (GST_CLOCK_TIME_IS_VALID(duration)) GST_BUFFER_DURATION(out_buffer) = duration;
 
+    gst_aggregator_selected_samples(aggregator, pts, dts, duration, NULL);
     flow = gst_aggregator_finish_buffer(aggregator, out_buffer);
   } else {
     if (out_buffer) gst_buffer_unref(out_buffer);
@@ -811,6 +1066,7 @@ need_more_data:
   }
   g_free(maps);
   g_free(buffers);
+  g_free(pads);
 
   return flow;
 }
@@ -846,6 +1102,13 @@ static void gst_image_reprojection_reset_equirect(GstImageReprojectionEquirect* 
 static void gst_image_reprojection_clear_config(GstImageReprojection* self) {
   guint old_count = self->camera_count;
 
+  if (self->latest_buffers) {
+    for (guint i = 0; i < old_count; ++i) {
+      if (self->latest_buffers[i]) gst_buffer_unref(self->latest_buffers[i]);
+    }
+    g_clear_pointer(&self->latest_buffers, g_free);
+  }
+
   if (self->planar_maps) {
     for (guint i = 0; i < old_count; ++i) {
       g_free(self->planar_maps[i]);
@@ -860,6 +1123,8 @@ static void gst_image_reprojection_clear_config(GstImageReprojection* self) {
     g_free(self->equirect_maps);
     self->equirect_maps = NULL;
   }
+  g_clear_pointer(&self->planar_dominant_map, g_free);
+  g_clear_pointer(&self->equirect_dominant_map, g_free);
   if (self->planar_accumulators) {
     for (guint i = 0; i < old_count; ++i) {
       g_free(self->planar_accumulators[i]);
@@ -894,6 +1159,10 @@ static void gst_image_reprojection_clear_config(GstImageReprojection* self) {
     self->cameras = NULL;
   }
   self->camera_count = 0;
+  self->sync_mode = GST_IMAGE_REPROJECTION_SYNC_WAIT_ALL;
+  self->frame_timeout_sec = 1.0;
+  self->frame_time_tolerance = 5 * GST_MSECOND;
+  self->wait_all_publish_partial = TRUE;
 
   gst_image_reprojection_reset_planar(&self->planar);
   gst_image_reprojection_reset_equirect(&self->equirect);
@@ -918,6 +1187,14 @@ static gboolean gst_image_reprojection_parse_camera(JsonObject* cam_obj, GstImag
   cam->cy = json_object_get_double_member(intr_obj, "cy");
   cam->width = (int)json_object_get_int_member(intr_obj, "width");
   cam->height = (int)json_object_get_int_member(intr_obj, "height");
+  if (!isfinite(cam->fx) || !isfinite(cam->fy) || !isfinite(cam->cx) || !isfinite(cam->cy) ||
+      cam->fx <= 0.0 || cam->fy <= 0.0 || cam->width <= 0 || cam->height <= 0 || cam->width > (G_MAXINT - 3) / 3) {
+    g_set_error(error, GST_RESOURCE_ERROR, GST_RESOURCE_ERROR_FAILED, "Invalid camera intrinsics");
+    return FALSE;
+  }
+  cam->map_width = cam->width;
+  cam->map_height = cam->height;
+  cam->stride = GST_ROUND_UP_4(cam->width * 3);
 
   JsonArray* planar_array = json_object_get_array_member(cam_obj, "planar_transform");
   cam->has_planar_matrix = planar_array && json_array_get_length(planar_array) >= 16;
@@ -1054,6 +1331,39 @@ static gboolean gst_image_reprojection_parse_equirect(JsonObject* root, GstImage
   return TRUE;
 }
 
+static gboolean gst_image_reprojection_parse_sync(JsonObject* root, GstImageReprojection* self, GError** error) {
+  if (!json_object_has_member(root, "sync")) return TRUE;
+  JsonObject* sync = json_object_get_object_member(root, "sync");
+  if (!sync) {
+    g_set_error(error, GST_RESOURCE_ERROR, GST_RESOURCE_ERROR_FAILED, "Sync configuration must be an object");
+    return FALSE;
+  }
+  const gchar* mode = json_object_get_string_member_or(sync, "mode", "wait_all");
+  if (g_strcmp0(mode, "wait_all") == 0 || g_strcmp0(mode, "all") == 0 || g_strcmp0(mode, "sync") == 0) {
+    self->sync_mode = GST_IMAGE_REPROJECTION_SYNC_WAIT_ALL;
+  } else if (g_strcmp0(mode, "lead_latest") == 0 || g_strcmp0(mode, "lead") == 0 ||
+             g_strcmp0(mode, "lead_image") == 0) {
+    self->sync_mode = GST_IMAGE_REPROJECTION_SYNC_LEAD_LATEST;
+  } else {
+    g_set_error(error, GST_RESOURCE_ERROR, GST_RESOURCE_ERROR_FAILED, "Unsupported sync mode: %s", mode);
+    return FALSE;
+  }
+  const double timeout = json_object_has_member(sync, "frame_timeout") ?
+                             json_object_get_double_member(sync, "frame_timeout") : 1.0;
+  const double tolerance = json_object_has_member(sync, "frame_time_tolerance") ?
+                               json_object_get_double_member(sync, "frame_time_tolerance") : 0.005;
+  if (!isfinite(timeout) || timeout < 0.0 || timeout > 3600.0 || !isfinite(tolerance) || tolerance < 0.0 ||
+      tolerance > 3600.0) {
+    g_set_error(error, GST_RESOURCE_ERROR, GST_RESOURCE_ERROR_FAILED, "Invalid sync timeout or tolerance");
+    return FALSE;
+  }
+  self->frame_timeout_sec = timeout;
+  self->frame_time_tolerance = (GstClockTime)(tolerance * GST_SECOND);
+  self->wait_all_publish_partial =
+      json_object_get_boolean_member_or(sync, "wait_all_publish_partial", TRUE);
+  return TRUE;
+}
+
 static gboolean gst_image_reprojection_load_config(GstImageReprojection* self, GError** error) {
   if (self->config_loaded) {
     return TRUE;
@@ -1095,6 +1405,7 @@ static gboolean gst_image_reprojection_load_config(GstImageReprojection* self, G
   }
 
   self->cameras = g_new0(GstImageReprojectionCamera, self->camera_count);
+  self->latest_buffers = g_new0(GstBuffer*, self->camera_count);
   for (guint i = 0; i < self->camera_count; ++i) {
     JsonObject* cam_obj = json_array_get_object_element(cam_array, i);
     if (!gst_image_reprojection_parse_camera(cam_obj, &self->cameras[i], error)) {
@@ -1108,6 +1419,10 @@ static gboolean gst_image_reprojection_load_config(GstImageReprojection* self, G
     return FALSE;
   }
   if (!gst_image_reprojection_parse_equirect(root_obj, &self->equirect, error)) {
+    g_object_unref(parser);
+    return FALSE;
+  }
+  if (!gst_image_reprojection_parse_sync(root_obj, self, error)) {
     g_object_unref(parser);
     return FALSE;
   }
@@ -1157,6 +1472,10 @@ static gboolean gst_image_reprojection_load_config(GstImageReprojection* self, G
   }
 
   self->config_loaded = TRUE;
+  const GstClockTime latency = self->sync_mode == GST_IMAGE_REPROJECTION_SYNC_WAIT_ALL &&
+                                       self->frame_timeout_sec > 0.0 ?
+                                   (GstClockTime)(self->frame_timeout_sec * GST_SECOND) : GST_MSECOND;
+  gst_aggregator_set_latency(GST_AGGREGATOR(self), latency, latency);
   self->warned_pad_count = FALSE;
   g_object_unref(parser);
   return TRUE;
@@ -1187,13 +1506,17 @@ static gboolean gst_image_reprojection_update_planar_maps(GstImageReprojection* 
   }
 
   self->planar_maps = g_new0(GstImageReprojectionPixelMap*, self->camera_count);
-  self->planar_accumulators = g_new0(float*, self->camera_count);
-  self->planar_weights = g_new0(float*, self->camera_count);
+  if (self->planar.blend_factor != 0.0) {
+    self->planar_accumulators = g_new0(float*, self->camera_count);
+    self->planar_weights = g_new0(float*, self->camera_count);
+  }
 
   for (guint i = 0; i < self->camera_count; ++i) {
     self->planar_maps[i] = g_new0(GstImageReprojectionPixelMap, pixel_count);
-    self->planar_accumulators[i] = g_new0(float, pixel_count * 3);
-    self->planar_weights[i] = g_new0(float, pixel_count);
+    if (self->planar.blend_factor != 0.0) {
+      self->planar_accumulators[i] = g_new0(float, pixel_count * 3);
+      self->planar_weights[i] = g_new0(float, pixel_count);
+    }
   }
 
   for (guint i = 0; i < self->camera_count; ++i) {
@@ -1226,6 +1549,10 @@ static gboolean gst_image_reprojection_update_planar_maps(GstImageReprojection* 
     }
   }
 
+  if (self->planar.blend_factor == 0.0) {
+    self->planar_dominant_map = gst_image_reprojection_build_dominant_map(self, self->planar_maps, pixel_count);
+  }
+
   return TRUE;
 }
 
@@ -1248,13 +1575,17 @@ static gboolean gst_image_reprojection_update_equirect_maps(GstImageReprojection
   }
 
   self->equirect_maps = g_new0(GstImageReprojectionPixelMap*, self->camera_count);
-  self->equirect_accumulators = g_new0(float*, self->camera_count);
-  self->equirect_weights = g_new0(float*, self->camera_count);
+  if (self->equirect.blend_factor != 0.0) {
+    self->equirect_accumulators = g_new0(float*, self->camera_count);
+    self->equirect_weights = g_new0(float*, self->camera_count);
+  }
 
   for (guint i = 0; i < self->camera_count; ++i) {
     self->equirect_maps[i] = g_new0(GstImageReprojectionPixelMap, pixel_count);
-    self->equirect_accumulators[i] = g_new0(float, pixel_count * 3);
-    self->equirect_weights[i] = g_new0(float, pixel_count);
+    if (self->equirect.blend_factor != 0.0) {
+      self->equirect_accumulators[i] = g_new0(float, pixel_count * 3);
+      self->equirect_weights[i] = g_new0(float, pixel_count);
+    }
   }
 
   for (guint i = 0; i < self->camera_count; ++i) {
@@ -1296,6 +1627,10 @@ static gboolean gst_image_reprojection_update_equirect_maps(GstImageReprojection
     }
   }
 
+  if (self->equirect.blend_factor == 0.0) {
+    self->equirect_dominant_map = gst_image_reprojection_build_dominant_map(self, self->equirect_maps, pixel_count);
+  }
+
   return TRUE;
 }
 
@@ -1319,6 +1654,7 @@ static gboolean gst_image_reprojection_ensure_output_caps(GstImageReprojection* 
   }
 
   gst_caps_replace(&self->src_caps, caps);
+  self->output_info = info;
   self->initial_events_pushed = FALSE;
   gst_caps_unref(caps);
   return TRUE;

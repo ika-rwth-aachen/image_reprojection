@@ -217,6 +217,10 @@ available. It includes:
 The GStreamer element `imagereprojection` uses this file through its `config-path`
 property. Its `projection-mode` property accepts `auto`, `planar`, and
 `equirectangular`; `auto` prefers planar when enabled.
+The export also includes `sync` settings. The GStreamer element matches buffers
+by PTS using camera 0 as the anchor and supports timed partial frames and
+`lead_latest`. With zero blending it uses the same dominant-map and direct
+partial-set paths as the ROS node.
 
 ## Logging and Timing
 

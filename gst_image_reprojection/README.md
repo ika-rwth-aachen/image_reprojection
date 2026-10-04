@@ -29,12 +29,37 @@ export GST_PLUGIN_PATH="/opt/gstreamer/lib/gstreamer-1.0:${GST_PLUGIN_PATH}"
 gst-inspect-1.0 imagereprojection
 ```
 
+For a focused plugin check (requires Python GObject bindings and GstApp):
+
+```bash
+GST_PLUGIN_PATH="$PWD/build" python3 tests/test_plugin.py
+```
+
 ## Properties
 
 | Parameter | Type | Description |
 | --- | --- | --- |
 | `config-path` | `string` | filepath to config exported by ROS Node (see `output.gstreamer.config_export_path`) |
 | `projection-mode` | `string` | projection method (`auto`, `planar`, `equirectangular`) |
+
+The ROS-exported JSON also supplies `sync.mode` (`wait_all` or `lead_latest`),
+`sync.frame_time_tolerance` (seconds), `sync.frame_timeout` (seconds), and
+`sync.wait_all_publish_partial` (default `true`). Older JSON without `sync`
+uses `wait_all`, 5 ms timestamp tolerance, a 1 s timeout, and partial output
+enabled. Camera 0 is the first configured camera and supplies the output PTS.
+
+In `wait_all`, the element retains buffers from other pads until they match
+camera 0 within the PTS tolerance. Complete sets publish immediately. When a
+camera is missing at the timeout, the element publishes the available images
+or discards the frame according to `wait_all_publish_partial`. In
+`lead_latest`, each camera 0 buffer publishes with the most recent eligible
+buffer from each other pad. Uncovered output pixels are black. The timeout
+uses the pipeline clock and expects timestamped video buffers.
+
+For `blend_factor: 0`, planar and equirectangular output use a precomputed
+winning-camera map when the full camera set has the configured dimensions.
+Partial sets and changed dimensions use direct sampling. Input and output BGR
+row strides are respected. Building the plugin requires GStreamer 1.22 or newer.
 
 ## Example Pipeline
 
@@ -47,6 +72,7 @@ The example pipeline processes 8 dummy input streams (for 5s) and exports the ou
 {
   "generated_by": "image_reprojection",
   "camera_count": 8,
+  "sync": {"mode": "wait_all", "frame_timeout": 1.0, "frame_time_tolerance": 0.005, "wait_all_publish_partial": true},
   "cameras": [
     {
       "index": 0,
