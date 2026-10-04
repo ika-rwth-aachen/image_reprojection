@@ -7,6 +7,9 @@
 #include <json-glib/json-glib.h>
 #include <math.h>
 #include <string.h>
+#ifdef HAVE_CUDA
+#include "gstimagereprojection_cuda.h"
+#endif
 
 #ifndef PACKAGE
 #define PACKAGE "gst_image_reprojection"
@@ -154,6 +157,15 @@ typedef struct _GstImageReprojection {
   GstImageReprojectionDominantMap* planar_dominant_map;
   GstImageReprojectionDominantMap* equirect_dominant_map;
 
+  gboolean use_gpu;
+#ifdef HAVE_CUDA
+  gboolean gpu_dominant_disabled;
+  gboolean gpu_multi_disabled;
+  const GstImageReprojectionDominantMap* gpu_map;
+  GstImageReprojectionCuda* gpu_context;
+  GstImageReprojectionCuda* gpu_multi_context;
+#endif
+
   float** planar_accumulators;
   float** planar_weights;
   float** equirect_accumulators;
@@ -177,6 +189,7 @@ enum {
   PROP_0,
   PROP_CONFIG_PATH,
   PROP_PROJECTION_MODE,
+  PROP_USE_GPU,
 };
 
 static GstStaticPadTemplate gst_image_reprojection_sink_template =
@@ -206,6 +219,19 @@ static gboolean gst_image_reprojection_load_config(GstImageReprojection* self, G
 static void gst_image_reprojection_clear_config(GstImageReprojection* self);
 static gboolean gst_image_reprojection_update_planar_maps(GstImageReprojection* self, GError** error);
 static gboolean gst_image_reprojection_update_equirect_maps(GstImageReprojection* self, GError** error);
+#ifdef HAVE_CUDA
+static void gst_image_reprojection_prepare_cuda(GstImageReprojection* self,
+                                                const GstImageReprojectionDominantMap* dominant,
+                                                guint width, guint height);
+static void gst_image_reprojection_prepare_cuda_multi(GstImageReprojection* self,
+                                                      GstImageReprojectionPixelMap** pixel_maps,
+                                                      guint width, guint height);
+static gboolean gst_image_reprojection_try_cuda_multi(GstImageReprojection* self,
+                                                       GstBuffer** buffers, GstMapInfo* maps,
+                                                       GstImageReprojectionPixelMap** pixel_maps,
+                                                       guint width, guint height, float blend,
+                                                       GstBuffer** out_buffer_ptr);
+#endif
 
 static gboolean gst_image_reprojection_ensure_output_caps(GstImageReprojection* self, GError** error);
 static gboolean gst_image_reprojection_push_initial_events(GstImageReprojection* self, GstAggregator* aggregator);
@@ -233,6 +259,12 @@ static void gst_image_reprojection_class_init(GstImageReprojectionClass* klass) 
                         "Projection to generate (auto/planar/equirectangular). In auto mode, planar is preferred if enabled",
                         GST_TYPE_IMAGE_REPROJECTION_MODE, GST_IMAGE_REPROJECTION_MODE_AUTO,
                         G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY));
+
+  g_object_class_install_property(
+      gobject_class, PROP_USE_GPU,
+      g_param_spec_boolean("use-gpu", "Use GPU",
+                           "Use CUDA for reprojection when available and input dimensions match the configuration",
+                           FALSE, G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY));
 
   gst_element_class_add_pad_template(element_class, gst_static_pad_template_get(&gst_image_reprojection_sink_template));
   gst_element_class_add_pad_template(element_class, gst_static_pad_template_get(&gst_image_reprojection_src_template));
@@ -283,6 +315,14 @@ static void gst_image_reprojection_init(GstImageReprojection* self) {
   self->equirect_maps = NULL;
   self->planar_dominant_map = NULL;
   self->equirect_dominant_map = NULL;
+  self->use_gpu = FALSE;
+#ifdef HAVE_CUDA
+  self->gpu_dominant_disabled = FALSE;
+  self->gpu_multi_disabled = FALSE;
+  self->gpu_map = NULL;
+  self->gpu_context = NULL;
+  self->gpu_multi_context = NULL;
+#endif
 
   self->planar_accumulators = NULL;
   self->planar_weights = NULL;
@@ -325,6 +365,11 @@ static void gst_image_reprojection_set_property(GObject* object, guint prop_id, 
       self->config_loaded = FALSE;
       g_mutex_unlock(&self->lock);
       break;
+    case PROP_USE_GPU:
+      g_mutex_lock(&self->lock);
+      self->use_gpu = g_value_get_boolean(value);
+      g_mutex_unlock(&self->lock);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
       break;
@@ -340,6 +385,9 @@ static void gst_image_reprojection_get_property(GObject* object, guint prop_id, 
       break;
     case PROP_PROJECTION_MODE:
       g_value_set_enum(value, self->mode_property);
+      break;
+    case PROP_USE_GPU:
+      g_value_set_boolean(value, self->use_gpu);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
@@ -405,6 +453,26 @@ static gboolean gst_image_reprojection_start(GstAggregator* aggregator) {
     }
     return FALSE;
   }
+
+#ifdef HAVE_CUDA
+  if (self->use_gpu) {
+    if (self->active_mode == GST_IMAGE_REPROJECTION_MODE_PLANAR &&
+        self->planar.blend_factor == 0.0 && self->planar_dominant_map) {
+      gst_image_reprojection_prepare_cuda(self, self->planar_dominant_map, self->planar.width, self->planar.height);
+    } else if (self->active_mode == GST_IMAGE_REPROJECTION_MODE_EQUIRECT &&
+               self->equirect.blend_factor == 0.0 && self->equirect_dominant_map) {
+      gst_image_reprojection_prepare_cuda(self, self->equirect_dominant_map,
+                                          self->equirect.width, self->equirect.height);
+    }
+    if (self->active_mode == GST_IMAGE_REPROJECTION_MODE_PLANAR) {
+      gst_image_reprojection_prepare_cuda_multi(self, self->planar_maps,
+                                                self->planar.width, self->planar.height);
+    } else if (self->active_mode == GST_IMAGE_REPROJECTION_MODE_EQUIRECT) {
+      gst_image_reprojection_prepare_cuda_multi(self, self->equirect_maps,
+                                                self->equirect.width, self->equirect.height);
+    }
+  }
+#endif
 
   if (GST_AGGREGATOR_CLASS(gst_image_reprojection_parent_class)->start) {
     return GST_AGGREGATOR_CLASS(gst_image_reprojection_parent_class)->start(aggregator);
@@ -508,20 +576,122 @@ static GstImageReprojectionDominantMap* gst_image_reprojection_build_dominant_ma
   return dominant;
 }
 
+#ifdef HAVE_CUDA
+static void gst_image_reprojection_prepare_cuda(GstImageReprojection* self,
+                                                const GstImageReprojectionDominantMap* dominant,
+                                                guint width, guint height) {
+  if (self->gpu_map == dominant || self->gpu_dominant_disabled) return;
+  gst_image_reprojection_cuda_destroy(self->gpu_context);
+  self->gpu_context = NULL;
+  self->gpu_map = dominant;
+  const gsize pixel_count = (gsize)width * height;
+  GstImageReprojectionCudaMap* cuda_maps = g_new(GstImageReprojectionCudaMap, pixel_count);
+  size_t* camera_bytes = g_new(size_t, self->camera_count);
+  for (guint i = 0; i < self->camera_count; ++i) {
+    camera_bytes[i] = (size_t)GST_ROUND_UP_4(self->cameras[i].map_width * 3) *
+                      self->cameras[i].map_height;
+  }
+  for (gsize p = 0; p < pixel_count; ++p) {
+    cuda_maps[p].camera = dominant[p].camera;
+    cuda_maps[p].source_offset = dominant[p].source_offset;
+    cuda_maps[p].right_step = dominant[p].right_step;
+    cuda_maps[p].down_step = dominant[p].down_step;
+    cuda_maps[p].dx = dominant[p].dx;
+    cuda_maps[p].dy = dominant[p].dy;
+  }
+  self->gpu_context = gst_image_reprojection_cuda_create(
+      cuda_maps, pixel_count, width, height, GST_VIDEO_INFO_COMP_STRIDE(&self->output_info, 0),
+      camera_bytes, self->camera_count);
+  g_free(cuda_maps);
+  g_free(camera_bytes);
+  if (!self->gpu_context) {
+    GST_WARNING_OBJECT(self, "CUDA map setup failed; falling back to CPU");
+    self->gpu_dominant_disabled = TRUE;
+  }
+}
+
+static void gst_image_reprojection_prepare_cuda_multi(GstImageReprojection* self,
+                                                      GstImageReprojectionPixelMap** pixel_maps,
+                                                      guint width, guint height) {
+  if (self->gpu_multi_context || self->gpu_multi_disabled) return;
+  const gsize pixel_count = (gsize)width * height;
+  _Static_assert(sizeof(GstImageReprojectionPixelMap) == sizeof(GstImageReprojectionCudaPixelMap),
+                 "CUDA pixel-map layout must match CPU pixel-map layout");
+  GstImageReprojectionCudaPixelMap* cuda_maps =
+      g_new(GstImageReprojectionCudaPixelMap, (gsize)self->camera_count * pixel_count);
+  size_t* camera_bytes = g_new(size_t, self->camera_count);
+  guint* widths = g_new(guint, self->camera_count);
+  guint* heights = g_new(guint, self->camera_count);
+  guint* strides = g_new(guint, self->camera_count);
+  for (guint i = 0; i < self->camera_count; ++i) {
+    widths[i] = self->cameras[i].map_width;
+    heights[i] = self->cameras[i].map_height;
+    strides[i] = GST_ROUND_UP_4(widths[i] * 3);
+    camera_bytes[i] = (size_t)strides[i] * heights[i];
+    memcpy(cuda_maps + (gsize)i * pixel_count, pixel_maps[i],
+           pixel_count * sizeof(GstImageReprojectionCudaPixelMap));
+  }
+  self->gpu_multi_context = gst_image_reprojection_cuda_create_multi(
+      cuda_maps, pixel_count, width, height, GST_VIDEO_INFO_COMP_STRIDE(&self->output_info, 0),
+      camera_bytes, widths, heights, strides, self->camera_count);
+  g_free(cuda_maps);
+  g_free(camera_bytes);
+  g_free(widths);
+  g_free(heights);
+  g_free(strides);
+  if (!self->gpu_multi_context) {
+    GST_WARNING_OBJECT(self, "CUDA multi-camera setup failed; falling back to CPU");
+    self->gpu_multi_disabled = TRUE;
+  }
+}
+
+static gboolean gst_image_reprojection_try_cuda_multi(GstImageReprojection* self,
+                                                       GstBuffer** buffers, GstMapInfo* maps,
+                                                       GstImageReprojectionPixelMap** pixel_maps,
+                                                       guint width, guint height, float blend,
+                                                       GstBuffer** out_buffer_ptr) {
+  if (!self->use_gpu || self->gpu_multi_disabled) return FALSE;
+  for (guint i = 0; i < self->camera_count; ++i) {
+    if (!buffers[i]) continue;
+    const GstImageReprojectionCamera* cam = &self->cameras[i];
+    if (cam->width != cam->map_width || cam->height != cam->map_height ||
+        cam->stride != GST_ROUND_UP_4(cam->map_width * 3)) return FALSE;
+    const gsize bytes = (gsize)cam->stride * cam->height;
+    if (cam->plane_offset > maps[i].size || bytes > maps[i].size - cam->plane_offset) return FALSE;
+  }
+  gst_image_reprojection_prepare_cuda_multi(self, pixel_maps, width, height);
+  if (!self->gpu_multi_context) return FALSE;
+  GstBuffer* out = gst_buffer_new_allocate(NULL, GST_VIDEO_INFO_SIZE(&self->output_info), NULL);
+  GstMapInfo out_map;
+  if (!out || !gst_buffer_map(out, &out_map, GST_MAP_WRITE)) {
+    if (out) gst_buffer_unref(out);
+    return FALSE;
+  }
+  const guint8** inputs = g_new0(const guint8*, self->camera_count);
+  for (guint i = 0; i < self->camera_count; ++i) {
+    if (buffers[i]) inputs[i] = maps[i].data + self->cameras[i].plane_offset;
+  }
+  const gboolean success = gst_image_reprojection_cuda_render_multi(
+      self->gpu_multi_context, inputs, out_map.data, blend);
+  g_free(inputs);
+  gst_buffer_unmap(out, &out_map);
+  if (success) {
+    *out_buffer_ptr = out;
+    return TRUE;
+  }
+  GST_WARNING_OBJECT(self, "CUDA multi-camera reprojection failed; falling back to CPU");
+  self->gpu_multi_disabled = TRUE;
+  gst_buffer_unref(out);
+  return FALSE;
+}
+#endif
+
 static GstFlowReturn gst_image_reprojection_process_zero_blend(GstImageReprojection* self, GstBuffer** buffers,
                                                                 GstMapInfo* maps, GstImageReprojectionPixelMap** pixel_maps,
                                                                 const GstImageReprojectionDominantMap* dominant,
                                                                 guint width, guint height, GstBuffer** out_buffer_ptr) {
   const gsize pixel_count = (gsize)width * height;
   const guint output_stride = GST_VIDEO_INFO_COMP_STRIDE(&self->output_info, 0);
-  GstBuffer* out = gst_buffer_new_allocate(NULL, GST_VIDEO_INFO_SIZE(&self->output_info), NULL);
-  GstMapInfo out_map;
-  if (!out || !gst_buffer_map(out, &out_map, GST_MAP_WRITE)) {
-    if (out) gst_buffer_unref(out);
-    return GST_FLOW_ERROR;
-  }
-  memset(out_map.data, 0, out_map.size);
-
   gboolean use_dominant = dominant != NULL;
   for (guint i = 0; i < self->camera_count; ++i) {
     const GstImageReprojectionCamera* cam = &self->cameras[i];
@@ -532,7 +702,50 @@ static GstFlowReturn gst_image_reprojection_process_zero_blend(GstImageReproject
     }
   }
 
+#ifdef HAVE_CUDA
+  if (!use_dominant &&
+      gst_image_reprojection_try_cuda_multi(self, buffers, maps, pixel_maps,
+                                            width, height, 0.0f, out_buffer_ptr)) return GST_FLOW_OK;
+#endif
+
+  GstBuffer* out = gst_buffer_new_allocate(NULL, GST_VIDEO_INFO_SIZE(&self->output_info), NULL);
+  GstMapInfo out_map;
+  if (!out || !gst_buffer_map(out, &out_map, GST_MAP_WRITE)) {
+    if (out) gst_buffer_unref(out);
+    return GST_FLOW_ERROR;
+  }
+
   if (use_dominant) {
+#ifdef HAVE_CUDA
+    if (self->use_gpu && !self->gpu_dominant_disabled) {
+      gst_image_reprojection_prepare_cuda(self, dominant, width, height);
+      if (self->gpu_context) {
+        const guint8** inputs = g_new(const guint8*, self->camera_count);
+        gboolean layout_ok = TRUE;
+        for (guint i = 0; i < self->camera_count; ++i) {
+          const GstImageReprojectionCamera* cam = &self->cameras[i];
+          const gsize bytes = (gsize)cam->stride * cam->height;
+          if (cam->plane_offset > maps[i].size || bytes > maps[i].size - cam->plane_offset) {
+            layout_ok = FALSE;
+            break;
+          }
+          inputs[i] = maps[i].data + cam->plane_offset;
+        }
+        if (layout_ok) {
+          if (gst_image_reprojection_cuda_render(self->gpu_context, inputs, out_map.data)) {
+            g_free(inputs);
+            gst_buffer_unmap(out, &out_map);
+            *out_buffer_ptr = out;
+            return GST_FLOW_OK;
+          }
+          GST_WARNING_OBJECT(self, "CUDA reprojection failed; falling back to CPU");
+          self->gpu_dominant_disabled = TRUE;
+        }
+        g_free(inputs);
+      }
+    }
+#endif
+    memset(out_map.data, 0, out_map.size);
     for (gsize p = 0; p < pixel_count; ++p) {
       const GstImageReprojectionDominantMap* entry = &dominant[p];
       if (entry->camera == G_MAXUINT) continue;
@@ -547,6 +760,7 @@ static GstFlowReturn gst_image_reprojection_process_zero_blend(GstImageReproject
       }
     }
   } else {
+    memset(out_map.data, 0, out_map.size);
     guint8* occupied = g_new0(guint8, pixel_count);
     for (guint i = 0; i < self->camera_count; ++i) {
       if (!buffers[i]) continue;
@@ -587,6 +801,12 @@ static GstFlowReturn gst_image_reprojection_process_planar(GstImageReprojection*
                                                      self->planar_dominant_map, self->planar.width,
                                                      self->planar.height, out_buffer_ptr);
   }
+
+#ifdef HAVE_CUDA
+  if (gst_image_reprojection_try_cuda_multi(self, buffers, maps, self->planar_maps,
+                                            self->planar.width, self->planar.height,
+                                            (float)self->planar.blend_factor, out_buffer_ptr)) return GST_FLOW_OK;
+#endif
 
   gst_image_reprojection_reset_scratch_planar(self);
 
@@ -715,6 +935,12 @@ static GstFlowReturn gst_image_reprojection_process_equirect(GstImageReprojectio
                                                      self->equirect_dominant_map, self->equirect.width,
                                                      self->equirect.height, out_buffer_ptr);
   }
+
+#ifdef HAVE_CUDA
+  if (gst_image_reprojection_try_cuda_multi(self, buffers, maps, self->equirect_maps,
+                                            self->equirect.width, self->equirect.height,
+                                            (float)self->equirect.blend_factor, out_buffer_ptr)) return GST_FLOW_OK;
+#endif
 
   gst_image_reprojection_reset_scratch_equirect(self);
 
@@ -1101,6 +1327,16 @@ static void gst_image_reprojection_reset_equirect(GstImageReprojectionEquirect* 
 
 static void gst_image_reprojection_clear_config(GstImageReprojection* self) {
   guint old_count = self->camera_count;
+
+#ifdef HAVE_CUDA
+  gst_image_reprojection_cuda_destroy(self->gpu_context);
+  gst_image_reprojection_cuda_destroy(self->gpu_multi_context);
+  self->gpu_context = NULL;
+  self->gpu_multi_context = NULL;
+  self->gpu_map = NULL;
+  self->gpu_dominant_disabled = FALSE;
+  self->gpu_multi_disabled = FALSE;
+#endif
 
   if (self->latest_buffers) {
     for (guint i = 0; i < old_count; ++i) {

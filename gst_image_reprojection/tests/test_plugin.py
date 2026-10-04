@@ -2,6 +2,7 @@
 """Run with GST_PLUGIN_PATH pointing at the built plugin directory."""
 
 import json
+import os
 import tempfile
 import time
 import unittest
@@ -15,7 +16,8 @@ from gi.repository import Gst, GstApp  # noqa: E402,F401
 Gst.init(None)
 
 
-def make_config(projection, partial=True, sync_mode="wait_all", input_width=4, output_width=8):
+def make_config(projection, partial=True, sync_mode="wait_all", input_width=4, output_width=8,
+                blend_factor=0):
     identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
     cameras = []
     for shift in (0.5, -0.5):
@@ -32,12 +34,12 @@ def make_config(projection, partial=True, sync_mode="wait_all", input_width=4, o
         "cameras": cameras,
         "planar": {
             "enabled": projection == "planar", "width": output_width, "height": 4,
-            "fx": 4, "fy": 4, "cx": output_width / 2, "cy": 2, "depth": 1, "blend_factor": 0,
+            "fx": 4, "fy": 4, "cx": output_width / 2, "cy": 2, "depth": 1, "blend_factor": blend_factor,
         },
         "equirectangular": {
             "enabled": projection == "equirectangular", "width": output_width, "height": 4,
             "hfov_rad": 3.141592653589793, "vfov_rad": 1.5707963267948966,
-            "radius": 1, "blend_factor": 0,
+            "radius": 1, "blend_factor": blend_factor,
         },
         "sync": {
             "mode": sync_mode, "frame_timeout": 0.05,
@@ -47,9 +49,10 @@ def make_config(projection, partial=True, sync_mode="wait_all", input_width=4, o
     }
 
 
-def run_pipeline(projection, sequence, partial=True, sync_mode="wait_all", input_width=4, output_width=8):
+def run_pipeline(projection, sequence, partial=True, sync_mode="wait_all", input_width=4, output_width=8,
+                 blend_factor=0, use_gpu=False):
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as config_file:
-        json.dump(make_config(projection, partial, sync_mode, input_width, output_width), config_file)
+        json.dump(make_config(projection, partial, sync_mode, input_width, output_width, blend_factor), config_file)
         config_file.flush()
         pipeline = Gst.Pipeline.new(None)
         reprojection = Gst.ElementFactory.make("imagereprojection")
@@ -57,6 +60,7 @@ def run_pipeline(projection, sequence, partial=True, sync_mode="wait_all", input
             raise RuntimeError("imagereprojection plugin not found in GST_PLUGIN_PATH")
         reprojection.set_property("config-path", config_file.name)
         reprojection.set_property("projection-mode", projection)
+        reprojection.set_property("use-gpu", use_gpu)
         sink = Gst.ElementFactory.make("appsink")
         sink.set_property("sync", False)
         pipeline.add(reprojection)
@@ -115,6 +119,19 @@ def run_pipeline(projection, sequence, partial=True, sync_mode="wait_all", input
 
 
 class PluginTest(unittest.TestCase):
+    def test_gpu_matches_cpu(self):
+        if os.environ.get("IMAGE_REPROJECTION_TEST_GPU") != "1":
+            self.skipTest("Set IMAGE_REPROJECTION_TEST_GPU=1 on a CUDA-enabled plugin with a GPU")
+        for projection in ("planar", "equirectangular"):
+            for blend_factor in (0, 0.5, 1):
+                for sequence in ([(1, 0), (0, 0)], [(0, 0)]):
+                    with self.subTest(projection=projection, blend=blend_factor, sequence=sequence):
+                        cpu = run_pipeline(projection, sequence, blend_factor=blend_factor)
+                        gpu = run_pipeline(projection, sequence, blend_factor=blend_factor, use_gpu=True)
+                        self.assertEqual([pts for pts, _ in cpu], [pts for pts, _ in gpu])
+                        self.assertEqual(len(cpu), 1)
+                        self.assertLessEqual(max(abs(a - b) for a, b in zip(cpu[0][1], gpu[0][1])), 1)
+
     def test_wait_all_complete_and_partial(self):
         for projection in ("planar", "equirectangular"):
             with self.subTest(projection=projection):

@@ -35,12 +35,23 @@ For a focused plugin check (requires Python GObject bindings and GstApp):
 GST_PLUGIN_PATH="$PWD/build" python3 tests/test_plugin.py
 ```
 
+On a CUDA-enabled build with a GPU, set `IMAGE_REPROJECTION_TEST_GPU=1` to
+also compare CPU and CUDA output for partial frames and blending.
+
+For a synthetic three-camera planar and eight-camera panorama latency comparison
+covering complete frames, partial frames, and blending:
+
+```bash
+GST_PLUGIN_PATH="$PWD/build" python3 tests/benchmark_gpu.py
+```
+
 ## Properties
 
 | Parameter | Type | Description |
 | --- | --- | --- |
 | `config-path` | `string` | filepath to config exported by ROS Node (see `output.gstreamer.config_export_path`) |
 | `projection-mode` | `string` | projection method (`auto`, `planar`, `equirectangular`) |
+| `use-gpu` | `boolean` | use CUDA when built with CUDA and input dimensions match the configuration (default `false`) |
 
 The ROS-exported JSON also supplies `sync.mode` (`wait_all` or `lead_latest`),
 `sync.frame_time_tolerance` (seconds), `sync.frame_timeout` (seconds), and
@@ -60,6 +71,17 @@ For `blend_factor: 0`, planar and equirectangular output use a precomputed
 winning-camera map when the full camera set has the configured dimensions.
 Partial sets and changed dimensions use direct sampling. Input and output BGR
 row strides are respected. Building the plugin requires GStreamer 1.22 or newer.
+
+CUDA support is included automatically when a CUDA compiler and toolkit are
+installed at build time. For example, the `rwthika/ros2-cuda:jazzy` image can
+be extended with `cuda-nvcc-12-6`, `cuda-cudart-dev-12-6`, and the GStreamer
+development packages above. Set `use-gpu=true` on the element to enable it.
+The CUDA path handles complete and partial frames with any configured blend
+factor. It accepts the existing raw BGR buffers and copies available inputs to
+the GPU and the output back; these transfers are included in frame latency.
+It requires a GPU that can run compute capability 7.5 PTX or newer. If CUDA
+initialization or rendering fails, processing falls back to the CPU. Frames
+with changed input dimensions also use the CPU path.
 
 ## Example Pipeline
 
