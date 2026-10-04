@@ -19,6 +19,9 @@
 #include <vector>
 
 #include <image_reprojection/image_reprojection.hpp>
+#ifdef HAVE_CUDA
+#include <reprojection_cuda.h>
+#endif
 #include <image_transport/image_transport.hpp>
 
 #include <rclcpp_components/register_node_macro.hpp>
@@ -126,6 +129,33 @@ void writeJsonArray(std::ostringstream& oss, const Container& values) {
 
 }  // namespace
 
+struct ImageReprojection::CudaState {
+#ifdef HAVE_CUDA
+  struct Projection {
+    ReprojectionCuda* dominant{nullptr};
+    ReprojectionCuda* multi{nullptr};
+    uint64_t version{std::numeric_limits<uint64_t>::max()};
+    bool dominant_failed{false};
+    bool multi_failed{false};
+
+    void reset(uint64_t new_version) {
+      reprojection_cuda_destroy(dominant);
+      reprojection_cuda_destroy(multi);
+      dominant = nullptr;
+      multi = nullptr;
+      version = new_version;
+      dominant_failed = false;
+      multi_failed = false;
+    }
+    ~Projection() { reset(version); }
+  };
+  Projection planar;
+  Projection equirect;
+#endif
+};
+
+ImageReprojection::~ImageReprojection() = default;
+
 ImageReprojection::ImageReprojection(const rclcpp::NodeOptions& options) : rclcpp::Node("image_reprojection", options) {
   loadParameters();
   if (enable_planar_) {
@@ -163,8 +193,12 @@ ImageReprojection::ImageReprojection(const rclcpp::NodeOptions& options) : rclcp
 
   RCLCPP_INFO(get_logger(),
               "Image reprojection node initialised with %zu inputs. "
-              "Projections: %s (%s). Sync mode: %s",
-              input_configs_.size(), projection_list.c_str(), frame_info.empty() ? "n/a" : frame_info.c_str(), sync_mode_str);
+              "Projections: %s (%s). Sync mode: %s. GPU: %s",
+              input_configs_.size(), projection_list.c_str(), frame_info.empty() ? "n/a" : frame_info.c_str(),
+              sync_mode_str, use_gpu_ ? "enabled" : "disabled");
+#ifndef HAVE_CUDA
+  if (use_gpu_) RCLCPP_WARN(get_logger(), "params.use_gpu is true, but this package was built without CUDA; using CPU");
+#endif
 
   // run setup after constructor has finished to enable shared_from_this()
   setup_timer_ = this->create_wall_timer(std::chrono::milliseconds(1), [this]() {
@@ -283,6 +317,7 @@ void ImageReprojection::loadParameters() {
   applyEquirectProjectionConfig(equirect_width, equirect_height, equirect_radius, equirect_fov_x_deg, equirect_blend_factor);
 
   recompute_every_frame_ = this->declare_parameter<bool>("params.recompute_every_frame", false, dynamic);
+  use_gpu_ = this->declare_parameter<bool>("params.use_gpu", false, fixed);
 
   const auto image_topics =
       this->declare_parameter<std::vector<std::string>>("input.image_topics", std::vector<std::string>{}, fixed);
@@ -575,6 +610,7 @@ void ImageReprojection::rebuildPlanarWarpCaches() {
   if (!enable_planar_) {
     return;
   }
+  ++planar_warp_version_;
   planar_dominant_map_ready_ = false;
   planar_warp_ready_.assign(input_configs_.size(), false);
   if (planar_warp_maps_.size() != input_configs_.size()) {
@@ -595,6 +631,7 @@ void ImageReprojection::rebuildEquirectWarpCaches() {
   if (!enable_equirectangular_) {
     return;
   }
+  ++equirect_warp_version_;
   equirect_dominant_map_ready_ = false;
   equirect_warp_ready_.assign(input_configs_.size(), false);
   if (equirect_warp_maps_.size() != input_configs_.size()) {
@@ -1629,6 +1666,13 @@ bool ImageReprojection::lookupCameraTransforms(const rclcpp::Time& stamp,
   }
 
   if (cache_updated) {
+    if (use_gpu_ && !recompute_every_frame_) {
+      if (planar_projection && !planar_dominant_map_ready_ && planar_blend_factor_ == 0.0)
+        rebuildPlanarDominantWarpCache();
+      if (!planar_projection && !equirect_dominant_map_ready_ && equirect_blend_factor_ == 0.0)
+        rebuildEquirectDominantWarpCache();
+      prepareCudaProjection(planar_projection);
+    }
     markGstConfigDirty();
     exportGstConfigIfReady();
   }
@@ -1699,6 +1743,17 @@ void ImageReprojection::cameraInfoCallback(size_t index, const CameraInfo::Const
     }
   }
 
+  if (use_gpu_ && !recompute_every_frame_) {
+    if (enable_planar_) {
+      if (!planar_dominant_map_ready_ && planar_blend_factor_ == 0.0) rebuildPlanarDominantWarpCache();
+      prepareCudaProjection(true);
+    }
+    if (enable_equirectangular_) {
+      if (!equirect_dominant_map_ready_ && equirect_blend_factor_ == 0.0) rebuildEquirectDominantWarpCache();
+      prepareCudaProjection(false);
+    }
+  }
+
   if (require_export) {
     markGstConfigDirty();
     exportGstConfigIfReady();
@@ -1706,6 +1761,7 @@ void ImageReprojection::cameraInfoCallback(size_t index, const CameraInfo::Const
 }
 
 void ImageReprojection::updatePlanarWarpCache(size_t index) {
+  ++planar_warp_version_;
   if (!enable_planar_ || recompute_every_frame_) {
     return;
   }
@@ -1772,6 +1828,7 @@ void ImageReprojection::updatePlanarWarpCache(size_t index) {
 }
 
 void ImageReprojection::updateEquirectWarpCache(size_t index) {
+  ++equirect_warp_version_;
   if (!enable_equirectangular_ || recompute_every_frame_) {
     return;
   }
@@ -1949,6 +2006,163 @@ bool ImageReprojection::renderDominantWarpCache(const std::vector<BgrImage>& inp
   return true;
 }
 
+void ImageReprojection::prepareCudaProjection(bool planar_projection) const {
+#ifdef HAVE_CUDA
+  if (!use_gpu_ || recompute_every_frame_) return;
+  const int width = planar_projection ? planar_width_ : equirect_width_;
+  const int height = planar_projection ? planar_height_ : equirect_height_;
+  const auto& warp_maps = planar_projection ? planar_warp_maps_ : equirect_warp_maps_;
+  const auto& warp_ready = planar_projection ? planar_warp_ready_ : equirect_warp_ready_;
+  const auto& dominant_map = planar_projection ? planar_dominant_map_ : equirect_dominant_map_;
+  const bool dominant_ready = planar_projection ? planar_dominant_map_ready_ : equirect_dominant_map_ready_;
+  const uint64_t version = planar_projection ? planar_warp_version_ : equirect_warp_version_;
+  const size_t camera_count = input_configs_.size();
+  if (width <= 0 || height <= 0 || camera_count == 0 || warp_maps.size() != camera_count ||
+      warp_ready.size() != camera_count) return;
+  const size_t pixel_count = static_cast<size_t>(width) * height;
+  if (!std::all_of(warp_ready.begin(), warp_ready.end(), [](bool ready) { return ready; })) return;
+
+  if (!cuda_state_) cuda_state_ = std::make_unique<CudaState>();
+  auto& state = planar_projection ? cuda_state_->planar : cuda_state_->equirect;
+  if (state.version != version) state.reset(version);
+  const bool need_multi = !state.multi && !state.multi_failed;
+  const bool need_dominant = dominant_ready && dominant_map.size() == pixel_count &&
+                             !state.dominant && !state.dominant_failed;
+  if (!need_multi && !need_dominant) return;
+  std::vector<size_t> camera_bytes(camera_count);
+  std::vector<unsigned> widths(camera_count), heights(camera_count), strides(camera_count);
+  for (size_t i = 0; i < camera_count; ++i) {
+    const auto& intr = static_intrinsics_[i];
+    if (intr.width <= 0 || intr.height <= 0 || warp_maps[i].size() != pixel_count) return;
+    widths[i] = static_cast<unsigned>(intr.width);
+    heights[i] = static_cast<unsigned>(intr.height);
+    strides[i] = widths[i] * 3;
+    camera_bytes[i] = static_cast<size_t>(strides[i]) * heights[i];
+  }
+
+  if (need_multi) {
+    std::vector<ReprojectionCudaPixelMap> maps(camera_count * pixel_count);
+    for (size_t i = 0; i < camera_count; ++i) {
+      for (size_t p = 0; p < pixel_count; ++p) {
+        maps[i * pixel_count + p] = {warp_maps[i][p].u, warp_maps[i][p].v};
+      }
+    }
+    state.multi = reprojection_cuda_create_multi(
+        maps.data(), pixel_count, static_cast<unsigned>(width), static_cast<unsigned>(height),
+        static_cast<unsigned>(width * 3), camera_bytes.data(), widths.data(), heights.data(),
+        strides.data(), static_cast<unsigned>(camera_count));
+    if (!state.multi) {
+      state.multi_failed = true;
+      RCLCPP_WARN(get_logger(), "CUDA multi-camera setup failed; using CPU for partial or blended frames");
+    }
+  }
+  if (need_dominant) {
+    std::vector<ReprojectionCudaMap> maps(pixel_count);
+    for (size_t p = 0; p < pixel_count; ++p) {
+      const auto& source = dominant_map[p];
+      auto& destination = maps[p];
+      destination.camera = source.camera;
+      destination.source_offset = source.source_offset;
+      destination.right_step = source.right_step;
+      destination.down_step = source.camera == std::numeric_limits<uint32_t>::max()
+                                  ? 0 : source.down_step * strides[source.camera];
+      destination.dx = source.dx;
+      destination.dy = source.dy;
+    }
+    state.dominant = reprojection_cuda_create(
+        maps.data(), pixel_count, static_cast<unsigned>(width), static_cast<unsigned>(height),
+        static_cast<unsigned>(width * 3), camera_bytes.data(), static_cast<unsigned>(camera_count));
+    if (!state.dominant) {
+      state.dominant_failed = true;
+      RCLCPP_WARN(get_logger(), "CUDA dominant-map setup failed; using CPU");
+    }
+  }
+#else
+  (void)planar_projection;
+#endif
+}
+
+bool ImageReprojection::renderCuda(const std::vector<BgrImage>& input_images,
+                                   const std::vector<CameraIntrinsics>& intrinsics,
+                                   const std::vector<bool>* camera_mask,
+                                   bool planar_projection,
+                                   sensor_msgs::msg::Image& output_image) const {
+#ifndef HAVE_CUDA
+  (void)input_images;
+  (void)intrinsics;
+  (void)camera_mask;
+  (void)planar_projection;
+  (void)output_image;
+  return false;
+#else
+  if (!use_gpu_ || recompute_every_frame_ || input_images.size() != input_configs_.size()) return false;
+  const int width = planar_projection ? planar_width_ : equirect_width_;
+  const int height = planar_projection ? planar_height_ : equirect_height_;
+  const float blend = static_cast<float>(planar_projection ? planar_blend_factor_ : equirect_blend_factor_);
+  const auto& warp_maps = planar_projection ? planar_warp_maps_ : equirect_warp_maps_;
+  const auto& warp_ready = planar_projection ? planar_warp_ready_ : equirect_warp_ready_;
+  const auto& dominant_map = planar_projection ? planar_dominant_map_ : equirect_dominant_map_;
+  const bool dominant_ready = planar_projection ? planar_dominant_map_ready_ : equirect_dominant_map_ready_;
+  const size_t camera_count = input_images.size();
+  const size_t pixel_count = static_cast<size_t>(width) * height;
+  if (warp_maps.size() != camera_count || warp_ready.size() != camera_count ||
+      intrinsics.size() != camera_count || width <= 0 || height <= 0) return false;
+
+  std::vector<const uint8_t*> inputs(camera_count, nullptr);
+  std::vector<size_t> camera_bytes(camera_count);
+  size_t active_count = 0;
+  for (size_t i = 0; i < camera_count; ++i) {
+    const auto& cached = static_intrinsics_[i];
+    if (cached.width < 0 || cached.height < 0) return false;
+    camera_bytes[i] = static_cast<size_t>(cached.width) * cached.height * 3;
+    const bool active = !camera_mask || camera_mask->size() != camera_count || (*camera_mask)[i];
+    if (!active) continue;
+    const auto& image = input_images[i];
+    const auto& frame_intr = intrinsics[i];
+    if (!warp_ready[i] || warp_maps[i].size() != pixel_count ||
+        image.width != cached.width || image.height != cached.height ||
+        image.data.size() < camera_bytes[i] ||
+        frame_intr.fx != cached.fx || frame_intr.fy != cached.fy ||
+        frame_intr.cx != cached.cx || frame_intr.cy != cached.cy ||
+        frame_intr.width != cached.width || frame_intr.height != cached.height) return false;
+    inputs[i] = image.data.data();
+    ++active_count;
+  }
+  if (active_count == 0) return false;
+
+  const bool use_dominant = blend == 0.0f && active_count == camera_count &&
+                            dominant_ready && dominant_map.size() == pixel_count;
+  prepareCudaProjection(planar_projection);
+  if (!cuda_state_) return false;
+  auto& state = planar_projection ? cuda_state_->planar : cuda_state_->equirect;
+  ReprojectionCuda* context = use_dominant ? state.dominant : state.multi;
+  if (!context) return false;
+
+  output_image.height = static_cast<uint32_t>(height);
+  output_image.width = static_cast<uint32_t>(width);
+  output_image.encoding = sensor_msgs::image_encodings::BGR8;
+  output_image.is_bigendian = false;
+  output_image.step = static_cast<uint32_t>(width * 3);
+  output_image.data.resize(pixel_count * 3);
+  const bool success = use_dominant
+                           ? reprojection_cuda_render(context, inputs.data(), output_image.data.data())
+                           : reprojection_cuda_render_multi(context, inputs.data(), output_image.data.data(), blend);
+  if (!success) {
+    if (use_dominant) {
+      reprojection_cuda_destroy(state.dominant);
+      state.dominant = nullptr;
+      state.dominant_failed = true;
+    } else {
+      reprojection_cuda_destroy(state.multi);
+      state.multi = nullptr;
+      state.multi_failed = true;
+    }
+    RCLCPP_WARN(get_logger(), "CUDA reprojection failed; using CPU");
+  }
+  return success;
+#endif
+}
+
 bool ImageReprojection::reprojectEquirectangular(const std::vector<BgrImage>& input_images,
                                                  const std::vector<CameraIntrinsics>& intrinsics,
                                                  const std::vector<tf2::Transform>& transforms,
@@ -1988,6 +2202,8 @@ bool ImageReprojection::reprojectEquirectangular(const std::vector<BgrImage>& in
     RCLCPP_WARN(get_logger(), "No active input cameras available for equirectangular reprojection.");
     return false;
   }
+
+  if (renderCuda(input_images, intrinsics, camera_mask, false, output_image)) return true;
 
   if (equirect_blend_factor_ == 0.0 && !recompute_every_frame_ &&
       renderDominantWarpCache(input_images, intrinsics, active_count, width, height, equirect_dominant_map_,
@@ -2390,6 +2606,8 @@ bool ImageReprojection::reprojectPlanar(const std::vector<BgrImage>& input_image
     RCLCPP_WARN(get_logger(), "No active input cameras available for planar reprojection.");
     return false;
   }
+
+  if (renderCuda(input_images, intrinsics, camera_mask, true, output_image)) return true;
 
   if (planar_blend_factor_ == 0.0 && !recompute_every_frame_ &&
       renderDominantWarpCache(input_images, intrinsics, active_count, width, height, planar_dominant_map_,

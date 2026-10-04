@@ -8,7 +8,7 @@
 #include <math.h>
 #include <string.h>
 #ifdef HAVE_CUDA
-#include "gstimagereprojection_cuda.h"
+#include "reprojection_cuda.h"
 #endif
 
 #ifndef PACKAGE
@@ -162,8 +162,8 @@ typedef struct _GstImageReprojection {
   gboolean gpu_dominant_disabled;
   gboolean gpu_multi_disabled;
   const GstImageReprojectionDominantMap* gpu_map;
-  GstImageReprojectionCuda* gpu_context;
-  GstImageReprojectionCuda* gpu_multi_context;
+  ReprojectionCuda* gpu_context;
+  ReprojectionCuda* gpu_multi_context;
 #endif
 
   float** planar_accumulators;
@@ -581,11 +581,11 @@ static void gst_image_reprojection_prepare_cuda(GstImageReprojection* self,
                                                 const GstImageReprojectionDominantMap* dominant,
                                                 guint width, guint height) {
   if (self->gpu_map == dominant || self->gpu_dominant_disabled) return;
-  gst_image_reprojection_cuda_destroy(self->gpu_context);
+  reprojection_cuda_destroy(self->gpu_context);
   self->gpu_context = NULL;
   self->gpu_map = dominant;
   const gsize pixel_count = (gsize)width * height;
-  GstImageReprojectionCudaMap* cuda_maps = g_new(GstImageReprojectionCudaMap, pixel_count);
+  ReprojectionCudaMap* cuda_maps = g_new(ReprojectionCudaMap, pixel_count);
   size_t* camera_bytes = g_new(size_t, self->camera_count);
   for (guint i = 0; i < self->camera_count; ++i) {
     camera_bytes[i] = (size_t)GST_ROUND_UP_4(self->cameras[i].map_width * 3) *
@@ -599,7 +599,7 @@ static void gst_image_reprojection_prepare_cuda(GstImageReprojection* self,
     cuda_maps[p].dx = dominant[p].dx;
     cuda_maps[p].dy = dominant[p].dy;
   }
-  self->gpu_context = gst_image_reprojection_cuda_create(
+  self->gpu_context = reprojection_cuda_create(
       cuda_maps, pixel_count, width, height, GST_VIDEO_INFO_COMP_STRIDE(&self->output_info, 0),
       camera_bytes, self->camera_count);
   g_free(cuda_maps);
@@ -615,10 +615,10 @@ static void gst_image_reprojection_prepare_cuda_multi(GstImageReprojection* self
                                                       guint width, guint height) {
   if (self->gpu_multi_context || self->gpu_multi_disabled) return;
   const gsize pixel_count = (gsize)width * height;
-  _Static_assert(sizeof(GstImageReprojectionPixelMap) == sizeof(GstImageReprojectionCudaPixelMap),
+  _Static_assert(sizeof(GstImageReprojectionPixelMap) == sizeof(ReprojectionCudaPixelMap),
                  "CUDA pixel-map layout must match CPU pixel-map layout");
-  GstImageReprojectionCudaPixelMap* cuda_maps =
-      g_new(GstImageReprojectionCudaPixelMap, (gsize)self->camera_count * pixel_count);
+  ReprojectionCudaPixelMap* cuda_maps =
+      g_new(ReprojectionCudaPixelMap, (gsize)self->camera_count * pixel_count);
   size_t* camera_bytes = g_new(size_t, self->camera_count);
   guint* widths = g_new(guint, self->camera_count);
   guint* heights = g_new(guint, self->camera_count);
@@ -629,9 +629,9 @@ static void gst_image_reprojection_prepare_cuda_multi(GstImageReprojection* self
     strides[i] = GST_ROUND_UP_4(widths[i] * 3);
     camera_bytes[i] = (size_t)strides[i] * heights[i];
     memcpy(cuda_maps + (gsize)i * pixel_count, pixel_maps[i],
-           pixel_count * sizeof(GstImageReprojectionCudaPixelMap));
+           pixel_count * sizeof(ReprojectionCudaPixelMap));
   }
-  self->gpu_multi_context = gst_image_reprojection_cuda_create_multi(
+  self->gpu_multi_context = reprojection_cuda_create_multi(
       cuda_maps, pixel_count, width, height, GST_VIDEO_INFO_COMP_STRIDE(&self->output_info, 0),
       camera_bytes, widths, heights, strides, self->camera_count);
   g_free(cuda_maps);
@@ -671,7 +671,7 @@ static gboolean gst_image_reprojection_try_cuda_multi(GstImageReprojection* self
   for (guint i = 0; i < self->camera_count; ++i) {
     if (buffers[i]) inputs[i] = maps[i].data + self->cameras[i].plane_offset;
   }
-  const gboolean success = gst_image_reprojection_cuda_render_multi(
+  const gboolean success = reprojection_cuda_render_multi(
       self->gpu_multi_context, inputs, out_map.data, blend);
   g_free(inputs);
   gst_buffer_unmap(out, &out_map);
@@ -732,7 +732,7 @@ static GstFlowReturn gst_image_reprojection_process_zero_blend(GstImageReproject
           inputs[i] = maps[i].data + cam->plane_offset;
         }
         if (layout_ok) {
-          if (gst_image_reprojection_cuda_render(self->gpu_context, inputs, out_map.data)) {
+          if (reprojection_cuda_render(self->gpu_context, inputs, out_map.data)) {
             g_free(inputs);
             gst_buffer_unmap(out, &out_map);
             *out_buffer_ptr = out;
@@ -1329,8 +1329,8 @@ static void gst_image_reprojection_clear_config(GstImageReprojection* self) {
   guint old_count = self->camera_count;
 
 #ifdef HAVE_CUDA
-  gst_image_reprojection_cuda_destroy(self->gpu_context);
-  gst_image_reprojection_cuda_destroy(self->gpu_multi_context);
+  reprojection_cuda_destroy(self->gpu_context);
+  reprojection_cuda_destroy(self->gpu_multi_context);
   self->gpu_context = NULL;
   self->gpu_multi_context = NULL;
   self->gpu_map = NULL;

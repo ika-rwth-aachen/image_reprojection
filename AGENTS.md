@@ -87,6 +87,9 @@ camera 0 frame. A timer flushes timed-out buckets even if input stops.
 - If a static transform is not ready when CameraInfo arrives, lookup is retried during frame processing.
 - Set `params.recompute_every_frame: true` for dynamic rigs. This disables
   warp-map reuse and performs stamped TF lookups for each processed frame.
+- Set `params.use_gpu: true` to use CUDA for static-map reprojection when the
+  package was built with CUDA. Complete, partial, and blended frames are
+  supported. Dynamic TF and changed input dimensions fall back to CPU.
 
 ## Projection and Blending
 
@@ -180,6 +183,7 @@ params:
   frame_time_tolerance: 0.005
   wait_all_publish_partial: true
   recompute_every_frame: false
+  use_gpu: false
 ```
 
 At least one projection must be enabled.
@@ -221,6 +225,8 @@ The export also includes `sync` settings. The GStreamer element matches buffers
 by PTS using camera 0 as the anchor and supports timed partial frames and
 `lead_latest`. With zero blending it uses the same dominant-map and direct
 partial-set paths as the ROS node.
+Its optional `use-gpu` property accelerates complete, partial, and blended
+frames when built with CUDA; the same CUDA renderer is shared with the ROS node.
 
 ## Logging and Timing
 
@@ -255,6 +261,8 @@ Runtime dependency:
 
 The GStreamer plugin depends on GStreamer, GStreamer Base/Video, JSON-GLib, and
 `libm`.
+CUDA compilation is optional for both targets and links the CUDA runtime only
+when a CUDA compiler and toolkit are present.
 
 ## Tips for Extending
 

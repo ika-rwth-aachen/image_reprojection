@@ -1,12 +1,12 @@
-#include "gstimagereprojection_cuda.h"
+#include "reprojection_cuda.h"
 
 #include <cuda_runtime.h>
 #include <stdlib.h>
 #include <string.h>
 
-struct GstImageReprojectionCuda {
-  GstImageReprojectionCudaMap* maps;
-  GstImageReprojectionCudaPixelMap* pixel_maps;
+struct ReprojectionCuda {
+  ReprojectionCudaMap* maps;
+  ReprojectionCudaPixelMap* pixel_maps;
   uint8_t* inputs;
   uint8_t* output;
   uint8_t* active;
@@ -41,7 +41,7 @@ static __device__ void sample_bgr(const uint8_t* input, unsigned stride, unsigne
   }
 }
 
-static __global__ void project_multi(const GstImageReprojectionCudaPixelMap* maps,
+static __global__ void project_multi(const ReprojectionCudaPixelMap* maps,
                                      const uint8_t* inputs, const uint8_t* active,
                                      const size_t* camera_offsets, const unsigned* camera_widths,
                                      const unsigned* camera_heights, const unsigned* camera_strides,
@@ -55,7 +55,7 @@ static __global__ void project_multi(const GstImageReprojectionCudaPixelMap* map
   unsigned contributors = 0;
   for (unsigned i = 0; i < camera_count; ++i) {
     if (!active[i]) continue;
-    const GstImageReprojectionCudaPixelMap map = maps[(size_t)i * pixel_count + p];
+    const ReprojectionCudaPixelMap map = maps[(size_t)i * pixel_count + p];
     const unsigned in_width = camera_widths[i], in_height = camera_heights[i];
     if (!isfinite(map.u) || !isfinite(map.v) || map.u < 0.0f || map.v < 0.0f ||
         map.u > (float)(in_width - 1) || map.v > (float)(in_height - 1)) continue;
@@ -89,12 +89,12 @@ static __global__ void project_multi(const GstImageReprojectionCudaPixelMap* map
   }
 }
 
-static __global__ void project(const GstImageReprojectionCudaMap* maps,
+static __global__ void project(const ReprojectionCudaMap* maps,
                                const uint8_t* inputs, uint8_t* output,
                                size_t pixel_count, unsigned width, unsigned output_stride) {
   const size_t p = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
   if (p >= pixel_count) return;
-  const GstImageReprojectionCudaMap entry = maps[p];
+  const ReprojectionCudaMap entry = maps[p];
   uint8_t* dst = output + (p / width) * output_stride + (p % width) * 3;
   if (entry.camera == UINT32_MAX) {
     dst[0] = dst[1] = dst[2] = 0;
@@ -109,11 +109,11 @@ static __global__ void project(const GstImageReprojectionCudaMap* maps,
   }
 }
 
-extern "C" GstImageReprojectionCuda* gst_image_reprojection_cuda_create(
-    const GstImageReprojectionCudaMap* maps, size_t pixel_count, unsigned width,
+extern "C" ReprojectionCuda* reprojection_cuda_create(
+    const ReprojectionCudaMap* maps, size_t pixel_count, unsigned width,
     unsigned height, unsigned output_stride, const size_t* camera_bytes, unsigned camera_count) {
   if (!maps || !pixel_count || !width || !height || !camera_count) return NULL;
-  GstImageReprojectionCuda* ctx = (GstImageReprojectionCuda*)calloc(1, sizeof(*ctx));
+  ReprojectionCuda* ctx = (ReprojectionCuda*)calloc(1, sizeof(*ctx));
   if (!ctx) return NULL;
   ctx->pixel_count = pixel_count;
   ctx->width = width;
@@ -122,8 +122,8 @@ extern "C" GstImageReprojectionCuda* gst_image_reprojection_cuda_create(
   ctx->camera_count = camera_count;
   ctx->camera_bytes = (size_t*)malloc(camera_count * sizeof(size_t));
   ctx->camera_offsets = (size_t*)malloc(camera_count * sizeof(size_t));
-  GstImageReprojectionCudaMap* combined =
-      (GstImageReprojectionCudaMap*)malloc(pixel_count * sizeof(*combined));
+  ReprojectionCudaMap* combined =
+      (ReprojectionCudaMap*)malloc(pixel_count * sizeof(*combined));
   size_t total_input_bytes = 0;
   if (!ctx->camera_bytes || !ctx->camera_offsets || !combined) goto failed;
   for (unsigned i = 0; i < camera_count; ++i) {
@@ -152,11 +152,11 @@ extern "C" GstImageReprojectionCuda* gst_image_reprojection_cuda_create(
   return ctx;
 failed:
   free(combined);
-  gst_image_reprojection_cuda_destroy(ctx);
+  reprojection_cuda_destroy(ctx);
   return NULL;
 }
 
-extern "C" bool gst_image_reprojection_cuda_render(GstImageReprojectionCuda* ctx,
+extern "C" bool reprojection_cuda_render(ReprojectionCuda* ctx,
                                                     const uint8_t* const* inputs, uint8_t* output) {
   if (!ctx || !inputs || !output) return false;
   for (unsigned i = 0; i < ctx->camera_count; ++i) {
@@ -171,13 +171,13 @@ extern "C" bool gst_image_reprojection_cuda_render(GstImageReprojectionCuda* ctx
          cudaMemcpy(output, ctx->output, ctx->output_bytes, cudaMemcpyDeviceToHost) == cudaSuccess;
 }
 
-extern "C" GstImageReprojectionCuda* gst_image_reprojection_cuda_create_multi(
-    const GstImageReprojectionCudaPixelMap* maps, size_t pixel_count, unsigned width,
+extern "C" ReprojectionCuda* reprojection_cuda_create_multi(
+    const ReprojectionCudaPixelMap* maps, size_t pixel_count, unsigned width,
     unsigned height, unsigned output_stride, const size_t* camera_bytes,
     const unsigned* camera_widths, const unsigned* camera_heights,
     const unsigned* camera_strides, unsigned camera_count) {
   if (!maps || !pixel_count || !width || !height || !camera_count) return NULL;
-  GstImageReprojectionCuda* ctx = (GstImageReprojectionCuda*)calloc(1, sizeof(*ctx));
+  ReprojectionCuda* ctx = (ReprojectionCuda*)calloc(1, sizeof(*ctx));
   if (!ctx) return NULL;
   ctx->pixel_count = pixel_count;
   ctx->width = width;
@@ -221,11 +221,11 @@ extern "C" GstImageReprojectionCuda* gst_image_reprojection_cuda_create_multi(
   if (cudaGetLastError() != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess) goto failed;
   return ctx;
 failed:
-  gst_image_reprojection_cuda_destroy(ctx);
+  reprojection_cuda_destroy(ctx);
   return NULL;
 }
 
-extern "C" bool gst_image_reprojection_cuda_render_multi(GstImageReprojectionCuda* ctx,
+extern "C" bool reprojection_cuda_render_multi(ReprojectionCuda* ctx,
                                                           const uint8_t* const* inputs,
                                                           uint8_t* output, float blend) {
   if (!ctx || !inputs || !output) return false;
@@ -248,7 +248,7 @@ extern "C" bool gst_image_reprojection_cuda_render_multi(GstImageReprojectionCud
          cudaMemcpy(output, ctx->output, ctx->output_bytes, cudaMemcpyDeviceToHost) == cudaSuccess;
 }
 
-extern "C" void gst_image_reprojection_cuda_destroy(GstImageReprojectionCuda* ctx) {
+extern "C" void reprojection_cuda_destroy(ReprojectionCuda* ctx) {
   if (!ctx) return;
   if (ctx->maps) cudaFree(ctx->maps);
   if (ctx->pixel_maps) cudaFree(ctx->pixel_maps);

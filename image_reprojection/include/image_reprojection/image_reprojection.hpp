@@ -31,6 +31,7 @@ namespace image_reprojection {
 class ImageReprojection : public rclcpp::Node {
  public:
   explicit ImageReprojection(const rclcpp::NodeOptions& options);
+  ~ImageReprojection() override;
 
  private:
   struct InputCameraConfig {
@@ -85,6 +86,8 @@ class ImageReprojection : public rclcpp::Node {
     uint8_t down_step{0};
   };
 
+  struct CudaState;
+
   enum class AggregationMode {
     WaitForAll,
     LeadWithLatest,
@@ -118,6 +121,12 @@ class ImageReprojection : public rclcpp::Node {
                                const std::vector<DominantPixelMapping>& mapping,
                                bool ready,
                                sensor_msgs::msg::Image& output_image) const;
+  bool renderCuda(const std::vector<BgrImage>& input_images,
+                  const std::vector<CameraIntrinsics>& intrinsics,
+                  const std::vector<bool>* camera_mask,
+                  bool planar_projection,
+                  sensor_msgs::msg::Image& output_image) const;
+  void prepareCudaProjection(bool planar_projection) const;
   void imageCallback(size_t index, const Image::ConstSharedPtr& image);
   void cameraInfoCallback(size_t index, const CameraInfo::ConstSharedPtr& info);
   void cleanupAccumulators(const rclcpp::Time& current_stamp);
@@ -189,6 +198,7 @@ class ImageReprojection : public rclcpp::Node {
   double frame_time_tolerance_sec_{0.005};
   bool wait_all_publish_partial_{true};
   bool recompute_every_frame_{false};
+  bool use_gpu_{false};
 
   std::vector<BgrImage> latest_images_;
   std::vector<bool> latest_image_ready_;
@@ -228,6 +238,9 @@ class ImageReprojection : public rclcpp::Node {
   bool equirect_dominant_map_ready_{false};
   std::vector<bool> planar_warp_ready_;
   std::vector<bool> equirect_warp_ready_;
+  uint64_t planar_warp_version_{0};
+  uint64_t equirect_warp_version_{0};
+  mutable std::unique_ptr<CudaState> cuda_state_;
 
   sensor_msgs::msg::CameraInfo planar_camera_info_{};
   sensor_msgs::msg::CameraInfo equirect_camera_info_{};

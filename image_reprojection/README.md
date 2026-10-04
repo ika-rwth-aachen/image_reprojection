@@ -64,6 +64,7 @@ flowchart LR
 | `output.projection.equirectangular.blend_factor` | `float` | `1.0` | factor by how much to blend between overlapping partitions of the output |
 | `output.gstreamer.config_export_path` | `string` | `""` | filepath for GStreamer config export |
 | `params.recompute_every_frame` | `bool` | `false` | whether to recompute projection every frame |
+| `params.use_gpu` | `bool` | `false` | use CUDA for static-map reprojection when built with CUDA; CPU fallback remains available |
 | `params.transform_timeout` | `float` | `0.05` | how long to wait for transforms |
 | `params.frame_timeout` | `float` | `1.0` | how long to wait for frames from all inputs |
 | `params.frame_time_tolerance` | `float` | `0.005` | how much time stamp difference to accept between inputs |
@@ -77,6 +78,15 @@ For either projection, `blend_factor: 0` uses a precomputed winning-camera map
 when transforms are static and all camera images match their CameraInfo sizes.
 Dynamic transforms and partial camera sets use direct sampling without blend
 buffers. Nonzero blending retains the weighted multi-camera path.
+
+When built with CUDA, `params.use_gpu: true` uses GPU reprojection for cached
+static transforms, including complete and partial frames and any blend factor.
+Input BGR images are copied to the GPU and the result is copied back before
+publication. CUDA maps are prepared when CameraInfo and static transforms
+become available, or on the first eligible frame if setup is still pending.
+Dynamic transforms (`recompute_every_frame: true`), changed input
+dimensions, and CUDA failures use the CPU path. The parameter is fixed at
+startup; builds without CUDA continue to work with the CPU renderer.
 
 ## Launch Files
 

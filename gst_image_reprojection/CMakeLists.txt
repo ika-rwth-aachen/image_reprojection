@@ -21,7 +21,8 @@ add_library(gstimagereprojection MODULE
 )
 
 if(CMAKE_CUDA_COMPILER)
-  target_sources(gstimagereprojection PRIVATE src/gstimagereprojection_cuda.cu)
+  target_sources(gstimagereprojection PRIVATE ../reprojection_cuda/reprojection_cuda.cu)
+  target_include_directories(gstimagereprojection PRIVATE ../reprojection_cuda)
   if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.18")
     set_property(TARGET gstimagereprojection PROPERTY CUDA_ARCHITECTURES OFF)
   endif()

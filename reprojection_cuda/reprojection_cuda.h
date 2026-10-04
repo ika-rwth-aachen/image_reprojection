@@ -11,32 +11,32 @@ typedef struct {
   uint32_t down_step;
   float dx;
   float dy;
-} GstImageReprojectionCudaMap;
+} ReprojectionCudaMap;
 
 typedef struct {
   float u;
   float v;
-} GstImageReprojectionCudaPixelMap;
+} ReprojectionCudaPixelMap;
 
-typedef struct GstImageReprojectionCuda GstImageReprojectionCuda;
+typedef struct ReprojectionCuda ReprojectionCuda;
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-GstImageReprojectionCuda* gst_image_reprojection_cuda_create(
-    const GstImageReprojectionCudaMap* maps, size_t pixel_count, unsigned width,
+ReprojectionCuda* reprojection_cuda_create(
+    const ReprojectionCudaMap* maps, size_t pixel_count, unsigned width,
     unsigned height, unsigned output_stride, const size_t* camera_bytes, unsigned camera_count);
-bool gst_image_reprojection_cuda_render(GstImageReprojectionCuda* context,
+bool reprojection_cuda_render(ReprojectionCuda* context,
                                         const uint8_t* const* inputs, uint8_t* output);
-GstImageReprojectionCuda* gst_image_reprojection_cuda_create_multi(
-    const GstImageReprojectionCudaPixelMap* maps, size_t pixel_count, unsigned width,
+ReprojectionCuda* reprojection_cuda_create_multi(
+    const ReprojectionCudaPixelMap* maps, size_t pixel_count, unsigned width,
     unsigned height, unsigned output_stride, const size_t* camera_bytes,
     const unsigned* camera_widths, const unsigned* camera_heights,
     const unsigned* camera_strides, unsigned camera_count);
-bool gst_image_reprojection_cuda_render_multi(GstImageReprojectionCuda* context,
+bool reprojection_cuda_render_multi(ReprojectionCuda* context,
                                               const uint8_t* const* inputs,
                                               uint8_t* output, float blend);
-void gst_image_reprojection_cuda_destroy(GstImageReprojectionCuda* context);
+void reprojection_cuda_destroy(ReprojectionCuda* context);
 #ifdef __cplusplus
 }
 #endif
