@@ -46,6 +46,7 @@ services:
 
   rviz:
     image: rwthika/ros2-cuda:jazzy-desktop-full
+    gpus: all
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
       DISPLAY: ${DISPLAY}
