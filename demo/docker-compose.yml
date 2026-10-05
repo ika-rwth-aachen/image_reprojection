@@ -3,6 +3,7 @@ services:
   image-reprojection.planar120:
     image: ghcr.io/ika-rwth-aachen/image_reprojection:v1.2.0
     command: ros2 launch image_reprojection image_reprojection_launch.py name:=image_reprojection_planar120
+    gpus: all
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
     volumes:
@@ -12,6 +13,7 @@ services:
   image-reprojection.equirectangular360:
     image: ghcr.io/ika-rwth-aachen/image_reprojection:v1.2.0
     command: ros2 launch image_reprojection image_reprojection_launch.py name:=image_reprojection_equirectangular360
+    gpus: all
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
     volumes:
@@ -20,6 +22,7 @@ services:
 
   # image-reprojection.planar-bev:
   #   image: ghcr.io/ika-rwth-aachen/image_reprojection:v1.2.0
+  #   gpus: all
   #   environment:
   #     RMW_IMPLEMENTATION: rmw_fastrtps_cpp
   #   volumes:

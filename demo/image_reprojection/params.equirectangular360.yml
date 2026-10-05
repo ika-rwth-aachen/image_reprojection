@@ -55,7 +55,9 @@
 
     params:
       recompute_every_frame: false
+      use_gpu: true
       transform_timeout: 0.05
       frame_timeout: 0.1
       frame_time_tolerance: 0.033
       sync_mode: wait_all
+      wait_all_publish_partial: true
