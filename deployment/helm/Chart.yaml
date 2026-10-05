@@ -6,4 +6,4 @@ description: Planar and Equirectangular Image Reprojection/Stitching for ROS 2 a
 dependencies:
   - repository: oci://ghcr.io/openads-project/openads-helm
     name: openadservice
-    version: 1.0.0
+    version: 1.2.0
