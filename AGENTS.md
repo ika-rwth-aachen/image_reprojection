@@ -50,7 +50,8 @@ See `gst_image_reprojection/README.md` for the install path and example pipeline
 ## ROS Node Behavior
 
 - One `image_transport` image subscription per input topic.
-- One reliable `sensor_msgs/msg/CameraInfo` subscription per input.
+- One best-effort `sensor_msgs/msg/CameraInfo` subscription per input, compatible
+  with both best-effort and reliable publishers.
 - Input image transport is configured with `input.<IMAGE_TOPIC>.image_transport`
   and defaults to `raw`.
 - CameraInfo is treated as static. Images are ignored until the corresponding
@@ -63,14 +64,19 @@ See `gst_image_reprojection/README.md` for the install path and example pipeline
 
 `params.sync_mode` controls how input frames are assembled:
 
-- `wait_all` (aliases: `all`, `sync`) groups images into timestamp buckets and
-  processes a bucket once all configured cameras are present within
-  `params.frame_time_tolerance`.
+- `wait_all` (aliases: `all`, `sync`) anchors timestamp buckets to camera 0.
+  Early arrivals from other cameras are held until a matching camera 0 frame
+  arrives. A bucket is processed once all configured cameras are present within
+  `params.frame_time_tolerance` of its anchor.
 - `lead_latest` (aliases: `lead`, `lead_image`) processes whenever camera 0
   arrives, using the latest available images from the other cameras if their
   stamps are within tolerance.
 
-Old partial `wait_all` buckets are removed after `params.frame_timeout`.
+After `params.frame_timeout` of wall time, partial `wait_all` buckets are
+published with their available cameras by default, leaving missing regions
+empty. Set `params.wait_all_publish_partial: false` to discard them instead.
+`params.frame_time_tolerance` still controls which image timestamps match a
+camera 0 frame. A timer flushes timed-out buckets even if input stops.
 
 ## Transforms and Caching
 
@@ -81,6 +87,9 @@ Old partial `wait_all` buckets are removed after `params.frame_timeout`.
 - If a static transform is not ready when CameraInfo arrives, lookup is retried during frame processing.
 - Set `params.recompute_every_frame: true` for dynamic rigs. This disables
   warp-map reuse and performs stamped TF lookups for each processed frame.
+- Set `params.use_gpu: true` to use CUDA for static-map reprojection when the
+  package was built with CUDA. Complete, partial, and blended frames are
+  supported. Dynamic TF and changed input dimensions fall back to CPU.
 
 ## Projection and Blending
 
@@ -109,7 +118,9 @@ blended = (1 - blend_factor) * dominant + blend_factor * weighted_average
 - Output CameraInfo uses `distortion_model = "plumb_bob"` and the computed
   pinhole intrinsics.
 - Static precompute includes per-column `x_norm`, per-row `y_norm`, and
-  per-camera warp maps when cached TF is available.
+  per-camera warp maps when cached TF is available. With zero blending and all
+  static camera maps ready, a combined map stores the winning camera and
+  bilinear sample data for each output pixel.
 
 ### Equirectangular Panorama
 
@@ -125,7 +136,9 @@ blended = (1 - blend_factor) * dominant + blend_factor * weighted_average
 - `K[0,0]` stores horizontal FOV in radians and `K[1,1]` stores vertical FOV
   in radians for consumers.
 - Static precompute includes sin/cos tables for latitude and longitude plus
-  per-camera warp maps when cached TF is available.
+  per-camera warp maps when cached TF is available. With zero blending and all
+  static camera maps ready, a combined map stores the winning camera and
+  bilinear sample data for each output pixel.
 
 ## Parameters
 
@@ -168,7 +181,9 @@ params:
   transform_timeout: 0.05
   frame_timeout: 1.0
   frame_time_tolerance: 0.005
+  wait_all_publish_partial: true
   recompute_every_frame: false
+  use_gpu: false
 ```
 
 At least one projection must be enabled.
@@ -206,6 +221,12 @@ available. It includes:
 The GStreamer element `imagereprojection` uses this file through its `config-path`
 property. Its `projection-mode` property accepts `auto`, `planar`, and
 `equirectangular`; `auto` prefers planar when enabled.
+The export also includes `sync` settings. The GStreamer element matches buffers
+by PTS using camera 0 as the anchor and supports timed partial frames and
+`lead_latest`. With zero blending it uses the same dominant-map and direct
+partial-set paths as the ROS node.
+Its optional `use-gpu` property accelerates complete, partial, and blended
+frames when built with CUDA; the same CUDA renderer is shared with the ROS node.
 
 ## Logging and Timing
 
@@ -240,6 +261,8 @@ Runtime dependency:
 
 The GStreamer plugin depends on GStreamer, GStreamer Base/Video, JSON-GLib, and
 `libm`.
+CUDA compilation is optional for both targets and links the CUDA runtime only
+when a CUDA compiler and toolkit are present.
 
 ## Tips for Extending
 

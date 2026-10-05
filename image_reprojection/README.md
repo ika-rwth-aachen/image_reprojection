@@ -26,7 +26,7 @@ flowchart LR
 | Topic | Type | Description |
 | --- | --- | --- |
 | `input.image_topics[:]` | `sensor_msgs/msg/Image` | input images |
-| `input.<IMAGE_TOPIC>.camera_info_topic` | `sensor_msgs/msg/Image` | input camera infos |
+| `input.<IMAGE_TOPIC>.camera_info_topic` | `sensor_msgs/msg/CameraInfo` | input camera infos; best-effort subscription accepts best-effort and reliable publishers |
 
 #### Published Topics
 
@@ -64,10 +64,29 @@ flowchart LR
 | `output.projection.equirectangular.blend_factor` | `float` | `1.0` | factor by how much to blend between overlapping partitions of the output |
 | `output.gstreamer.config_export_path` | `string` | `""` | filepath for GStreamer config export |
 | `params.recompute_every_frame` | `bool` | `false` | whether to recompute projection every frame |
+| `params.use_gpu` | `bool` | `false` | use CUDA for static-map reprojection when built with CUDA; CPU fallback remains available |
 | `params.transform_timeout` | `float` | `0.05` | how long to wait for transforms |
 | `params.frame_timeout` | `float` | `1.0` | how long to wait for frames from all inputs |
 | `params.frame_time_tolerance` | `float` | `0.005` | how much time stamp difference to accept between inputs |
-| `params.sync_mode` | `string` | `"wait_all"` | `wait_all`: wait for all inputs; `lead_latest`: start publishing with leading after timeout has passed |
+| `params.sync_mode` | `string` | `"wait_all"` | `wait_all`: match all inputs to camera 0 timestamps; `lead_latest`: publish on camera 0 using other recent images |
+| `params.wait_all_publish_partial` | `bool` | `true` | in `wait_all`, publish available cameras after `frame_timeout`; when `false`, discard incomplete frames |
+
+The exported GStreamer JSON includes a `sync` object with these four synchronization
+settings. The GStreamer plugin uses the exported values at startup.
+
+For either projection, `blend_factor: 0` uses a precomputed winning-camera map
+when transforms are static and all camera images match their CameraInfo sizes.
+Dynamic transforms and partial camera sets use direct sampling without blend
+buffers. Nonzero blending retains the weighted multi-camera path.
+
+When built with CUDA, `params.use_gpu: true` uses GPU reprojection for cached
+static transforms, including complete and partial frames and any blend factor.
+Input BGR images are copied to the GPU and the result is copied back before
+publication. CUDA maps are prepared when CameraInfo and static transforms
+become available, or on the first eligible frame if setup is still pending.
+Dynamic transforms (`recompute_every_frame: true`), changed input
+dimensions, and CUDA failures use the CPU path. The parameter is fixed at
+startup; builds without CUDA continue to work with the CPU renderer.
 
 ## Launch Files
 

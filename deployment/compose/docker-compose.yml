@@ -1,7 +1,7 @@
 services:
 
   image-reprojection:
-    image: ghcr.io/ika-rwth-aachen/image_reprojection:v1.1.1
+    image: ghcr.io/ika-rwth-aachen/image_reprojection:v1.2.0
     environment:
       # --- name ------
       NAMESPACE: /
@@ -9,7 +9,7 @@ services:
       # --- other -----
       LOG_LEVEL: ${LOG_LEVEL:-info}
       USE_SIM_TIME: ${USE_SIM_TIME:-false}
-      PARAMS: ${PARAMS:-/docker-ros/ws/install/image_reprojection/share/image_reprojection/config/params.yml}
+      PARAMS: /docker-ros/ws/install/image_reprojection/share/image_reprojection/config/params.yml
     command:
       - /bin/bash
       - -ic
