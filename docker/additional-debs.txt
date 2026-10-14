@@ -1,3 +1,5 @@
+cuda-nvcc-12-6
+cuda-cudart-dev-12-6
 gstreamer1.0-alsa
 gstreamer1.0-gl
 gstreamer1.0-gtk3

@@ -2,7 +2,18 @@ cmake_minimum_required(VERSION 3.8)
 project(image_reprojection)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-  add_compile_options(-Wall -Wextra -Wpedantic)
+  add_compile_options(
+    $<$<COMPILE_LANGUAGE:CXX>:-Wall>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wextra>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wpedantic>
+  )
+endif()
+
+include(CheckLanguage)
+check_language(CUDA)
+if(CMAKE_CUDA_COMPILER)
+  enable_language(CUDA)
+  find_package(CUDAToolkit REQUIRED)
 endif()
 
 find_package(ament_cmake REQUIRED)
@@ -18,6 +29,20 @@ find_package(tf2_ros REQUIRED)
 set(TARGET_NAME image_reprojection_component)
 
 add_library(${TARGET_NAME} SHARED src/image_reprojection.cpp)
+
+if(CMAKE_CUDA_COMPILER)
+  target_sources(${TARGET_NAME} PRIVATE ../reprojection_cuda/reprojection_cuda.cu)
+  target_include_directories(${TARGET_NAME} PRIVATE ../reprojection_cuda)
+  target_compile_definitions(${TARGET_NAME} PRIVATE HAVE_CUDA=1)
+  target_compile_options(${TARGET_NAME} PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:-gencode=arch=compute_75,code=compute_75>
+    $<$<COMPILE_LANGUAGE:CUDA>:--fmad=false>
+  )
+  if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.18")
+    set_property(TARGET ${TARGET_NAME} PROPERTY CUDA_ARCHITECTURES OFF)
+  endif()
+  target_link_libraries(${TARGET_NAME} CUDA::cudart)
+endif()
 
 rclcpp_components_register_node(${TARGET_NAME}
   PLUGIN "image_reprojection::ImageReprojection"
